@@ -11,6 +11,37 @@ const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'unihub-encryption-key-for-email-credentials-change-me';
 
+// ── Encryption helpers (AES-256-GCM) ─────────────────────────────
+function deriveKey(secret) {
+  return crypto.createHash('sha256').update(secret).digest();
+}
+
+function encrypt(text) {
+  const iv = crypto.randomBytes(12);
+  const key = deriveKey(ENCRYPTION_KEY);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  let encrypted = cipher.update(text, 'utf8', 'hex');
+  encrypted += cipher.final('hex');
+  const authTag = cipher.getAuthTag().toString('hex');
+  return iv.toString('hex') + ':' + authTag + ':' + encrypted;
+}
+
+function decrypt(encryptedText) {
+  try {
+    const [ivHex, authTagHex, encrypted] = encryptedText.split(':');
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    const key = deriveKey(ENCRYPTION_KEY);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encrypted, 'hex', 'utf8');
+    decrypted += decipher.final('utf8');
+    return decrypted;
+  } catch {
+    return null;
+  }
+}
+
 // Database connection pool
 let db;
 
@@ -43,8 +74,13 @@ async function initDatabase() {
     process.exit(1);
   }
   try {
-    db = await mysql.createPool({
-      uri: databaseUrl,
+    const dbUrl = new URL(databaseUrl);
+    db = mysql.createPool({
+      host: dbUrl.hostname,
+      port: parseInt(dbUrl.port, 10) || 3306,
+      user: decodeURIComponent(dbUrl.username),
+      password: decodeURIComponent(dbUrl.password),
+      database: dbUrl.pathname.slice(1),
       waitForConnections: true,
       connectionLimit: 10,
       queueLimit: 0,
@@ -354,6 +390,27 @@ const routes = {
       return { error: 'Failed to change password', status: 500 };
     }
   },
+
+  'PUT /api/auth/profile': async (req, userId, body) => {
+    if (!userId) return { error: 'Unauthorized', status: 401 };
+
+    const { full_name } = body;
+    if (full_name === undefined || full_name === null) {
+      return { error: 'Full name is required', status: 400 };
+    }
+
+    try {
+      await db.execute('UPDATE users SET full_name = ? WHERE id = ?', [full_name.trim() || null, userId]);
+      const [users] = await db.execute(
+        'SELECT id, email, full_name, avatar_url, role FROM users WHERE id = ?',
+        [userId]
+      );
+      return { user: users[0] };
+    } catch (error) {
+      console.error('Profile update error:', error);
+      return { error: 'Failed to update profile', status: 500 };
+    }
+  },
   
   // Stats endpoint
   'GET /api/stats': async (req, userId) => {
@@ -400,13 +457,17 @@ const routes = {
   
   'POST /api/contacts': async (req, userId, body) => {
     if (!userId) return { error: 'Unauthorized', status: 401 };
-    
+
+    const { first_name, last_name, email, phone, company, job_title, notes } = body;
+    if (!first_name || !first_name.trim()) {
+      return { error: 'First name is required', status: 400 };
+    }
+
     try {
-      const { first_name, last_name, email, phone, company, job_title, notes } = body;
       const contactId = crypto.randomUUID();
       await db.execute(
         'INSERT INTO contacts (id, user_id, first_name, last_name, email, phone, company, job_title, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [contactId, userId, first_name, last_name || null, email || null, phone || null, company || null, job_title || null, notes || null]
+        [contactId, userId, first_name.trim(), last_name || null, email || null, phone || null, company || null, job_title || null, notes || null]
       );
       
       const [contacts] = await db.execute('SELECT * FROM contacts WHERE id = ?', [contactId]);
@@ -418,14 +479,18 @@ const routes = {
   
   'PUT /api/contacts/:id': async (req, userId, body) => {
     if (!userId) return { error: 'Unauthorized', status: 401 };
-    
+
+    const { first_name, last_name, email, phone, company, job_title, notes } = body;
+    if (!first_name || !first_name.trim()) {
+      return { error: 'First name is required', status: 400 };
+    }
+
     try {
       const id = req.url.split('/').pop();
-      const { first_name, last_name, email, phone, company, job_title, notes } = body;
       
       await db.execute(
         'UPDATE contacts SET first_name = ?, last_name = ?, email = ?, phone = ?, company = ?, job_title = ?, notes = ? WHERE id = ? AND user_id = ?',
-        [first_name, last_name || null, email || null, phone || null, company || null, job_title || null, notes || null, id, userId]
+        [first_name.trim(), last_name || null, email || null, phone || null, company || null, job_title || null, notes || null, id, userId]
       );
       
       const [contacts] = await db.execute('SELECT * FROM contacts WHERE id = ? AND user_id = ?', [id, userId]);
@@ -551,7 +616,7 @@ const routes = {
       const accountId = crypto.randomUUID();
       await db.execute(
         'INSERT INTO mail_accounts (id, user_id, email_address, display_name, provider, imap_host, imap_port, smtp_host, smtp_port, encrypted_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [accountId, userId, email_address, display_name || null, provider, imap_host || null, imap_port || 993, smtp_host || null, smtp_port || 587, encrypted_password || null]
+        [accountId, userId, email_address, display_name || null, provider, imap_host || null, imap_port || 993, smtp_host || null, smtp_port || 587, encrypted_password ? encrypt(encrypted_password) : null]
       );
       
       const [accounts] = await db.execute('SELECT id, user_id, email_address, display_name, provider, is_active FROM mail_accounts WHERE id = ?', [accountId]);

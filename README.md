@@ -1,73 +1,148 @@
-# Welcome to your Lovable project
+# UniHub - Self-Hosted Productivity Suite
 
-## Project info
+> **Disclaimer:** This project was entirely AI-generated and built by someone with zero coding experience. It is a learning/hobby project and **must not be used in production without thorough security review and testing**. There will be bugs, security vulnerabilities, incomplete features, and rough edges throughout the codebase. Use at your own risk.
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+## What is UniHub?
 
-## How can I edit this code?
+UniHub is a self-hosted, all-in-one productivity hub that combines contacts management, calendar scheduling, and email account management into a single web application. It runs entirely on your own infrastructure using Docker.
 
-There are several ways of editing your application.
+## Tech Stack
 
-**Use Lovable**
+**Frontend:**
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+- React 18 + TypeScript
+- Vite (build tool)
+- Tailwind CSS + shadcn/ui components
+- TanStack React Query
+- Framer Motion animations
+- Progressive Web App (PWA) support
 
-Changes made via Lovable will be committed automatically to this repo.
+**Backend:**
 
-**Use your preferred IDE**
+- Node.js with a vanilla HTTP server (no framework)
+- MySQL 8.0
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+**Infrastructure:**
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+- Docker + Docker Compose
+- Nginx (reverse proxy + static file serving)
 
-Follow these steps:
+## Prerequisites
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+- No other dependencies needed — everything runs in containers
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+## Quick Start
 
-# Step 3: Install the necessary dependencies.
-npm i
+1. **Clone the repository:**
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
+   ```bash
+   git clone <your-repo-url>
+   cd unify-self-host
+   ```
+
+2. **Configure environment variables:**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   Edit `.env` and set secure values for:
+
+   - `JWT_SECRET` — a long random string for signing authentication tokens
+   - `ENCRYPTION_KEY` — a long random string for encrypting sensitive data (mail credentials)
+   - `MYSQL_ROOT_PASSWORD` — MySQL root password
+   - `MYSQL_PASSWORD` — MySQL application user password
+
+3. **Start the application:**
+
+   ```bash
+   docker compose up -d
+   ```
+
+4. **Access UniHub:**
+
+   Open [http://localhost](http://localhost) in your browser.
+
+5. **Default admin credentials:**
+
+   - Email: `admin@unihub.local`
+   - Password: `admin123`
+   - **Change this password immediately after first login!**
+
+## Environment Variables
+
+| Variable             | Description                              | Required |
+| -------------------- | ---------------------------------------- | -------- |
+| `JWT_SECRET`         | Secret key for JWT token signing         | Yes      |
+| `ENCRYPTION_KEY`     | Key for encrypting mail credentials      | Yes      |
+| `MYSQL_HOST`         | MySQL hostname                           | Yes      |
+| `MYSQL_PORT`         | MySQL port (default: 3306)               | No       |
+| `MYSQL_DATABASE`     | MySQL database name                      | Yes      |
+| `MYSQL_USER`         | MySQL username                           | Yes      |
+| `MYSQL_PASSWORD`     | MySQL password                           | Yes      |
+| `MYSQL_ROOT_PASSWORD`| MySQL root password                      | Yes      |
+
+## Project Structure
+
+```
+├── api/
+│   ├── server.js          # Backend API server (Node.js)
+│   └── package.json       # Backend dependencies
+├── src/                   # Frontend React application
+│   ├── components/        # Reusable UI components
+│   ├── contexts/          # React context providers
+│   ├── hooks/             # Custom React hooks
+│   ├── lib/               # Utilities and API client
+│   └── pages/             # Page components
+├── docker/
+│   ├── mysql/             # MySQL config and schema init scripts
+│   └── nginx/             # Nginx configuration
+├── docker-compose.yml     # Docker Compose orchestration
+├── Dockerfile             # Frontend container (Nginx)
+├── Dockerfile.api         # API container (Node.js)
+└── package.json           # Frontend dependencies
+```
+
+## Features
+
+- **Contacts** — create, edit, search, and favorite contacts
+- **Calendar** — schedule events with color coding and location support
+- **Mail** — email account management (IMAP/SMTP sync is not yet implemented)
+- **Admin Panel** — user management for administrators
+- **PWA Support** — installable as a native-like app on mobile and desktop
+- **Authentication** — JWT-based auth with session management and rate limiting
+
+## Known Limitations & Security Warnings
+
+> **This is an AI-generated project. Read the following carefully before deploying.**
+
+- **No HTTPS by default** — Nginx serves over plain HTTP; place a TLS-terminating reverse proxy (Caddy, Traefik, etc.) in front for production use
+- **Mail sync is not functional** — email accounts can be added but IMAP/SMTP sync is not implemented yet
+- **Basic input validation** — common cases are handled but edge cases may slip through
+- **No CSRF protection** — the API relies solely on JWT Bearer tokens
+- **No email verification** — user email addresses are not verified on signup
+- **In-memory rate limiting** — rate-limit state is lost when the API container restarts
+- **Single-server only** — no clustering or horizontal scaling support
+- **No automated backups** — you must back up your MySQL data volume manually
+- **Limited error handling** — some error scenarios may return generic 500 errors
+- **No audit logging** — user actions are not logged for security auditing
+- **Default admin password** — ships with a well-known default; change it immediately
+
+## Development
+
+To run the frontend locally for development:
+
+```bash
+# Install frontend dependencies
+npm install
+
+# Start the dev server (requires the API + MySQL to be running via Docker)
 npm run dev
 ```
 
-**Edit a file directly in GitHub**
+The Vite dev server proxies API requests to `localhost:4000`.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+## License
 
-**Use GitHub Codespaces**
-
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
-
-## What technologies are used for this project?
-
-This project is built with:
-
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
-
-## How can I deploy this project?
-
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
-
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+This project is provided as-is with no warranty. Use at your own risk.

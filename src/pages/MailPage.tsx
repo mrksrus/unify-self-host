@@ -1,7 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
-import { useAuth } from '@/contexts/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -66,7 +65,6 @@ const folders = [
 ];
 
 const MailPage = () => {
-  const { user } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
@@ -80,6 +78,15 @@ const MailPage = () => {
     imap_host: '',
     smtp_host: '',
   });
+
+  // Open compose dialog if linked from dashboard
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('action') === 'compose') {
+      setIsComposeOpen(true);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
 
   // Fetch mail accounts
   const { data: accounts = [], isLoading: accountsLoading } = useQuery({

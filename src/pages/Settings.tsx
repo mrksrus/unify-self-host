@@ -8,7 +8,7 @@ import { Separator } from '@/components/ui/separator';
 import { useToast } from '@/hooks/use-toast';
 import { api } from '@/lib/api';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog';
-import { User, Shield, Bell, Palette, Download, Loader2 } from 'lucide-react';
+import { User, Shield, Download, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 const Settings = () => {
@@ -56,48 +56,18 @@ const Settings = () => {
   const handleUpdateProfile = async () => {
     setLoading(true);
     try {
-      // Note: Profile update endpoint would need to be added to API
-      // For now, this is a placeholder
-      toast({ title: 'Profile update coming soon', description: 'This feature will be available in the next update' });
+      const response = await api.put('/auth/profile', { full_name: fullName.trim() });
+      if (response.error) {
+        toast({ title: 'Failed to update profile', description: response.error, variant: 'destructive' });
+      } else {
+        toast({ title: 'Profile updated successfully' });
+      }
     } catch (error: any) {
       toast({ title: 'Failed to update profile', description: error.message, variant: 'destructive' });
     } finally {
       setLoading(false);
     }
   };
-
-  const sections = [
-    {
-      id: 'profile',
-      title: 'Profile',
-      description: 'Manage your account details',
-      icon: User,
-    },
-    {
-      id: 'security',
-      title: 'Security',
-      description: 'Password and authentication',
-      icon: Shield,
-    },
-    {
-      id: 'notifications',
-      title: 'Notifications',
-      description: 'Configure how you receive alerts',
-      icon: Bell,
-    },
-    {
-      id: 'appearance',
-      title: 'Appearance',
-      description: 'Customize the look and feel',
-      icon: Palette,
-    },
-    {
-      id: 'data',
-      title: 'Data & Export',
-      description: 'Download or delete your data',
-      icon: Download,
-    },
-  ];
 
   return (
     <div className="p-6 lg:p-8 max-w-4xl mx-auto">

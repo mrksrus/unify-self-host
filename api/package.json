@@ -1,0 +1,15 @@
+{
+  "name": "unihub-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "UniHub API Server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.11.5"
+  }
+}
