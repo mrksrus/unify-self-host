@@ -50,18 +50,37 @@ class ApiClient {
         headers,
       });
 
+      const contentType = response.headers.get('content-type') || '';
+      const isJson = contentType.includes('application/json');
+
+      if (!isJson) {
+        const text = await response.text();
+        const preview = text.slice(0, 80).replace(/\s+/g, ' ');
+        return {
+          error: response.ok
+            ? 'Server returned non-JSON response'
+            : `Request failed (${response.status}). Server may have timed out or returned an error page. Try again; if adding mail, wait a few minutes and retry.`,
+          details: preview,
+        };
+      }
+
       const data = await response.json();
 
       if (!response.ok) {
         return {
           error: data.error || `HTTP ${response.status}: ${response.statusText}`,
+          details: data.details,
         };
       }
 
       return { data };
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Network error';
+      const isJsonError = message.includes('JSON') && message.includes('<');
       return {
-        error: error instanceof Error ? error.message : 'Network error',
+        error: isJsonError
+          ? 'Request timed out or server returned an error page. Mail sync can take 1–2 minutes — try again or check server logs.'
+          : message,
       };
     }
   }

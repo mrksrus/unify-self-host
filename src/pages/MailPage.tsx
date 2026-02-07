@@ -550,57 +550,49 @@ const MailPage = () => {
                       required={!editingAccount}
                     />
                   </div>
-                  {(accountForm.provider === 'custom' || accountForm.provider === 'exchange') && (
-                    <>
-                      {accountForm.provider === 'exchange' && (
-                        <p className="text-xs text-muted-foreground -mt-2 mb-2">
-                          For on-premise Exchange, enter your server hostname (e.g., mail.company.com) and use your domain\username format if required.
-                        </p>
-                      )}
-                      <div className="space-y-2">
-                        <Label htmlFor="imap_host">IMAP/Exchange Server</Label>
-                        <Input
-                          id="imap_host"
-                          value={accountForm.imap_host}
-                          onChange={(e) => setAccountForm({ ...accountForm, imap_host: e.target.value })}
-                          placeholder={accountForm.provider === 'exchange' ? 'mail.company.com' : 'imap.example.com'}
-                          required
-                        />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="smtp_host">SMTP Server</Label>
-                        <Input
-                          id="smtp_host"
-                          value={accountForm.smtp_host}
-                          onChange={(e) => setAccountForm({ ...accountForm, smtp_host: e.target.value })}
-                          placeholder={accountForm.provider === 'exchange' ? 'mail.company.com' : 'smtp.example.com'}
-                          required
-                        />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="imap_port">IMAP Port</Label>
-                          <Input
-                            id="imap_port"
-                            type="number"
-                            value={accountForm.imap_port}
-                            onChange={(e) => setAccountForm({ ...accountForm, imap_port: parseInt(e.target.value) || 993 })}
-                            placeholder="993"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="smtp_port">SMTP Port</Label>
-                          <Input
-                            id="smtp_port"
-                            type="number"
-                            value={accountForm.smtp_port}
-                            onChange={(e) => setAccountForm({ ...accountForm, smtp_port: parseInt(e.target.value) || 587 })}
-                            placeholder="587"
-                          />
-                        </div>
-                      </div>
-                    </>
-                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Server details are filled from the provider; you can change any value.
+                  </p>
+                  <div className="space-y-2">
+                    <Label htmlFor="imap_host">IMAP Server</Label>
+                    <Input
+                      id="imap_host"
+                      value={accountForm.imap_host}
+                      onChange={(e) => setAccountForm({ ...accountForm, imap_host: e.target.value })}
+                      placeholder="e.g. imap.gmail.com"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="imap_port">IMAP Port</Label>
+                    <Input
+                      id="imap_port"
+                      type="number"
+                      value={accountForm.imap_port}
+                      onChange={(e) => setAccountForm({ ...accountForm, imap_port: parseInt(e.target.value) || 993 })}
+                      placeholder="993"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="smtp_host">SMTP Server</Label>
+                    <Input
+                      id="smtp_host"
+                      value={accountForm.smtp_host}
+                      onChange={(e) => setAccountForm({ ...accountForm, smtp_host: e.target.value })}
+                      placeholder="e.g. smtp.gmail.com"
+                      required
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="smtp_port">SMTP Port</Label>
+                    <Input
+                      id="smtp_port"
+                      type="number"
+                      value={accountForm.smtp_port}
+                      onChange={(e) => setAccountForm({ ...accountForm, smtp_port: parseInt(e.target.value) || 587 })}
+                      placeholder="587"
+                    />
+                  </div>
                   <div className="flex justify-end gap-3 pt-2">
                     <Button type="button" variant="outline" onClick={() => setIsAddAccountOpen(false)}>
                       Cancel
