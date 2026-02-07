@@ -43,6 +43,8 @@ services:
       MYSQL_USER: unihub
       MYSQL_PASSWORD: CHANGE_ME_db_password         # ← MUST match above
       MYSQL_ROOT_PASSWORD: CHANGE_ME_root_password  # ← CHANGE THIS
+      # Allow root access from other containers on the network
+      MYSQL_ROOT_HOST: "%"
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
