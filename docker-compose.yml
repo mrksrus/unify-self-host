@@ -1,9 +1,3 @@
-# ── Shared database credentials (change before first launch) ──────
-x-db-credentials: &db_credentials
-  MYSQL_DATABASE: unihub
-  MYSQL_USER: unihub
-  MYSQL_PASSWORD: changeme_user_password          # ← CHANGE THIS
-
 services:
   # ── UniHub Application (Frontend + API) ─────────────────────────
   #
@@ -16,24 +10,24 @@ services:
   #
   unihub:
     image: ghcr.io/mrksrus/unify-self-host:latest
-    # build: .                          # Remove this line on TrueNAS / when using pre-built images
     container_name: unihub
     restart: unless-stopped
     ports:
       - "3000:80"
     environment:
       NODE_ENV: production
-      <<: *db_credentials
+      MYSQL_DATABASE: unihub
+      MYSQL_USER: unihub
+      MYSQL_PASSWORD: CHANGE_ME_db_password          # ← CHANGE THIS
       MYSQL_HOST: unihub-mysql
       MYSQL_PORT: "3306"
       # ── Required: set a strong, random secret ──────────────────────
       # Generate one with:  openssl rand -base64 48
       JWT_SECRET: ""                               # ← REQUIRED – fill this in
       # ── Encryption key for stored email passwords ──────────────────
-      ENCRYPTION_KEY: changeme_encryption_key      # ← CHANGE THIS
+      ENCRYPTION_KEY: CHANGE_ME_encryption_key     # ← CHANGE THIS
     depends_on:
-      unihub-mysql:
-        condition: service_healthy
+      - unihub-mysql
     networks:
       - unihub-network
     volumes:
@@ -45,20 +39,23 @@ services:
     container_name: unihub-mysql
     restart: unless-stopped
     environment:
-      <<: *db_credentials
-      MYSQL_ROOT_PASSWORD: changeme_root_password  # ← CHANGE THIS
+      MYSQL_DATABASE: unihub
+      MYSQL_USER: unihub
+      MYSQL_PASSWORD: CHANGE_ME_db_password         # ← MUST match above
+      MYSQL_ROOT_PASSWORD: CHANGE_ME_root_password  # ← CHANGE THIS
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --max-connections=100
     volumes:
       - mysql_data:/var/lib/mysql
+    # Health check uses MYSQL_PWD to avoid YAML escaping issues
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 120s
     networks:
       - unihub-network
 

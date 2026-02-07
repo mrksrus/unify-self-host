@@ -29,13 +29,12 @@ This project is intended to be deployed by pasting a YAML file into your contain
 
 ### Step 1 — Copy the YAML
 
-Copy the contents of [`docker-compose.yml`](docker-compose.yml) (or the version below with `build:` removed) into your platform's custom app / stack editor:
+TrueNAS (and some UIs) do not support YAML anchors or `build:`. Use the fully expanded YAML below (no anchors), which is known to work with TrueNAS:
 
 ```yaml
-x-db-credentials: &db_credentials
-  MYSQL_DATABASE: unihub
-  MYSQL_USER: unihub
-  MYSQL_PASSWORD: CHANGE_ME_db_password            # ← set a strong password
+networks:
+  unihub-network:
+    driver: bridge
 
 services:
   unihub:
@@ -46,14 +45,15 @@ services:
       - "3000:80"
     environment:
       NODE_ENV: production
-      <<: *db_credentials
+      MYSQL_DATABASE: unihub
+      MYSQL_USER: unihub
+      MYSQL_PASSWORD: CHANGE_ME_db_password
       MYSQL_HOST: unihub-mysql
       MYSQL_PORT: "3306"
       JWT_SECRET: ""                               # ← REQUIRED – generate with: openssl rand -base64 48
-      ENCRYPTION_KEY: CHANGE_ME_encryption_key     # ← set a random string
+      ENCRYPTION_KEY: CHANGE_ME_encryption_key
     depends_on:
-      unihub-mysql:
-        condition: service_healthy
+      - unihub-mysql
     networks:
       - unihub-network
     volumes:
@@ -64,8 +64,10 @@ services:
     container_name: unihub-mysql
     restart: unless-stopped
     environment:
-      <<: *db_credentials
-      MYSQL_ROOT_PASSWORD: CHANGE_ME_root_password # ← set a strong password
+      MYSQL_DATABASE: unihub
+      MYSQL_USER: unihub
+      MYSQL_PASSWORD: CHANGE_ME_db_password
+      MYSQL_ROOT_PASSWORD: CHANGE_ME_root_password
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
@@ -73,17 +75,13 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p$${MYSQL_ROOT_PASSWORD}"]
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 120s
     networks:
       - unihub-network
-
-networks:
-  unihub-network:
-    driver: bridge
 
 volumes:
   mysql_data:
@@ -98,7 +96,7 @@ Replace every `CHANGE_ME_*` value and fill in `JWT_SECRET`:
 
 | Value | What to put there |
 |-------|-------------------|
-| `MYSQL_PASSWORD` | A strong password (set once, shared by both containers via the YAML anchor) |
+| `MYSQL_PASSWORD` | A strong password (must match in both services) |
 | `MYSQL_ROOT_PASSWORD` | A different strong password for the MySQL root user |
 | `JWT_SECRET` | A long random string — generate with `openssl rand -base64 48` |
 | `ENCRYPTION_KEY` | Another random string — used to encrypt stored mail credentials |
