@@ -9,6 +9,32 @@ const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const imaps = require('imap-simple');
 const { simpleParser } = require('mailparser');
+const fs = require('fs');
+const path = require('path');
+
+// Debug logging helper - write to container filesystem and console
+const DEBUG_LOG_PATH = '/app/debug.log';
+const debugLog = (location, message, data, hypothesisId, runId = 'run1') => {
+  try {
+    const logEntry = {
+      id: `log_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: Date.now(),
+      location,
+      message,
+      data,
+      runId,
+      hypothesisId,
+    };
+    const logLine = JSON.stringify(logEntry);
+    // Write to file
+    fs.appendFileSync(DEBUG_LOG_PATH, logLine + '\n');
+    // Also log to console for Docker logs visibility
+    console.log(`[DEBUG] ${location}: ${message}`, JSON.stringify(data));
+  } catch (e) {
+    // Fallback to console only if file write fails
+    console.log(`[DEBUG] ${location}: ${message}`, JSON.stringify(data), `[LOG ERROR: ${e.message}]`);
+  }
+};
 
 const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -50,16 +76,28 @@ function decrypt(encryptedText) {
 async function syncMailAccount(accountId) {
   let connection = null;
   try {
+    // #region agent log
+    debugLog('server.js:50', 'syncMailAccount START', { accountId }, 'H1');
+    // #endregion
     const [accounts] = await db.execute(
       'SELECT * FROM mail_accounts WHERE id = ?',
       [accountId]
     );
+    // #region agent log
+    debugLog('server.js:56', 'Account query result', { accountFound: !!accounts[0], email: accounts[0]?.email_address, hasEncryptedPassword: !!accounts[0]?.encrypted_password }, 'H4');
+    // #endregion
     if (!accounts[0]) {
       return { success: false, error: `Account ${accountId} not found in database` };
     }
 
     const account = accounts[0];
+    // #region agent log
+    debugLog('server.js:62', 'Before password decrypt', { hasEncryptedPassword: !!account.encrypted_password, imapHost: account.imap_host, imapPort: account.imap_port, username: account.username || account.email_address }, 'H2');
+    // #endregion
     const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
+    // #region agent log
+    debugLog('server.js:63', 'After password decrypt', { passwordDecrypted: !!password, passwordLength: password?.length || 0 }, 'H2');
+    // #endregion
     if (!password) {
       return { success: false, error: 'No password configured for this account' };
     }
@@ -75,33 +113,73 @@ async function syncMailAccount(accountId) {
         authTimeout: 15000,
       },
     };
-
+    // #region agent log
+    debugLog('server.js:67', 'IMAP config before connect', { host: config.imap.host, port: config.imap.port, user: config.imap.user, hasPassword: !!config.imap.password }, 'H1');
+    // #endregion
     console.log(`[SYNC] Connecting to ${account.email_address} at ${account.imap_host}:${account.imap_port}...`);
     connection = await imaps.connect(config);
+    // #region agent log
+    debugLog('server.js:80', 'IMAP connected, opening INBOX', { connected: !!connection }, 'H1');
+    // #endregion
     console.log(`[SYNC] Connected. Opening INBOX...`);
     await connection.openBox('INBOX');
+    // #region agent log
+    debugLog('server.js:82', 'INBOX opened', {}, 'H1');
+    // #endregion
 
     // Fetch recent emails (no date filter - avoids SINCE format issues across providers)
+    // First, search for all message UIDs
+    const uids = await connection.search(['ALL'], {});
+    console.log(`[SYNC] Found ${uids.length} messages in INBOX`);
+    // #region agent log
+    debugLog('server.js:91', 'IMAP search completed', { uidCount: uids.length }, 'H1');
+    // #endregion
+
+    // Take last 500 to avoid overwhelming the database
+    const uidsToSync = uids.slice(-500);
+    
+    // Now fetch the actual messages with their bodies
     const fetchOptions = {
       bodies: ['HEADER', 'TEXT'],
       markSeen: false,
       struct: true,
     };
+    const messages = await connection.fetch(uidsToSync, fetchOptions);
+    // #region agent log
+    debugLog('server.js:99', 'IMAP fetch completed', { messageCount: messages.length }, 'H1');
+    // #endregion
 
-    const messages = await connection.search(['ALL'], fetchOptions);
-    console.log(`[SYNC] Found ${messages.length} messages in INBOX`);
-
-    // Take last 500 to avoid overwhelming the database
-    const messagesToSync = messages.slice(-500);
     let newEmailsCount = 0;
 
-    for (const item of messagesToSync) {
-      const all = item.parts.find(p => p.which === '');
-      const id = item.attributes.uid;
-      const idHeader = `Imap-ID: ${id}`;
-      const rawEmail = all ? all.body : '';
+    for (const item of messages) {
+      const uid = item.attributes.uid;
+      
+      // Extract header and body from parts
+      // When using bodies: ['HEADER', 'TEXT'], item.parts contains objects with 'which' and 'body'
+      const headerPart = item.parts.find(p => p.which === 'HEADER');
+      const textPart = item.parts.find(p => p.which === 'TEXT');
+      
+      // Get header and body content
+      const headerContent = headerPart?.body || '';
+      const bodyContent = textPart?.body || '';
+      
+      // Combine header and body for parsing (RFC822 format)
+      // Headers end with \r\n\r\n, then body follows
+      const fullEmail = headerContent + (bodyContent ? '\r\n' + bodyContent : '');
+      
+      // #region agent log
+      debugLog('server.js:104', 'Before parsing email', { uid, hasHeader: !!headerContent, hasBody: !!bodyContent, fullEmailLength: fullEmail?.length || 0 }, 'H3');
+      // #endregion
 
-      const parsed = await simpleParser(idHeader + '\r\n' + rawEmail);
+      if (!fullEmail || fullEmail.trim().length === 0) {
+        console.log(`[SYNC] Skipping message ${uid}: no content`);
+        continue;
+      }
+
+      const parsed = await simpleParser(fullEmail);
+      // #region agent log
+      debugLog('server.js:105', 'After parsing email', { parsed: !!parsed, hasSubject: !!parsed?.subject, hasFrom: !!parsed?.from }, 'H3');
+      // #endregion
       const messageId = parsed.messageId || `${account.id}-${id}`;
 
       // Check if already synced
@@ -113,6 +191,9 @@ async function syncMailAccount(accountId) {
 
       // Insert email
       const emailId = crypto.randomUUID();
+      // #region agent log
+      debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId }, 'H4');
+      // #endregion
       await db.execute(
         'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         [
@@ -129,6 +210,9 @@ async function syncMailAccount(accountId) {
           parsed.date || new Date(),
         ]
       );
+      // #region agent log
+      debugLog('server.js:131', 'DB insert success', { emailId }, 'H4');
+      // #endregion
       newEmailsCount++;
     }
 
@@ -148,6 +232,9 @@ async function syncMailAccount(accountId) {
       try { connection.end(); } catch (e) { /* ignore */ }
     }
     const errorMsg = error.message || String(error);
+    // #region agent log
+    debugLog('server.js:146', 'syncMailAccount ERROR', { accountId, errorMessage: errorMsg, errorStack: error.stack?.substring(0, 200), errorName: error.name }, 'H1,H2,H3,H4');
+    // #endregion
     console.error(`[SYNC] ✗ Error syncing account ${accountId}:`, errorMsg);
     
     // Provide user-friendly error messages
@@ -168,6 +255,9 @@ async function syncMailAccount(accountId) {
 
 async function sendEmail(accountId, { to, subject, body, isHtml = false }) {
   try {
+    // #region agent log
+    debugLog('server.js:169', 'sendEmail START', { accountId, to, subjectLength: subject?.length || 0, bodyLength: body?.length || 0, isHtml }, 'H5');
+    // #endregion
     const [accounts] = await db.execute(
       'SELECT * FROM mail_accounts WHERE id = ?',
       [accountId]
@@ -175,18 +265,29 @@ async function sendEmail(accountId, { to, subject, body, isHtml = false }) {
     if (!accounts[0]) throw new Error('Account not found');
 
     const account = accounts[0];
+    // #region agent log
+    debugLog('server.js:177', 'Account loaded for send', { email: account.email_address, smtpHost: account.smtp_host, smtpPort: account.smtp_port, hasPassword: !!account.encrypted_password }, 'H5');
+    // #endregion
     const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
     if (!password) throw new Error('No password configured');
 
+    const smtpPort = account.smtp_port || 587;
     const transporter = nodemailer.createTransport({
       host: account.smtp_host,
-      port: account.smtp_port || 587,
-      secure: account.smtp_port === 465,
+      port: smtpPort,
+      secure: smtpPort === 465, // SSL/TLS for port 465
+      requireTLS: smtpPort === 587, // STARTTLS for port 587
       auth: {
         user: account.username || account.email_address,
         pass: password,
       },
+      tls: {
+        rejectUnauthorized: false, // Allow self-signed certificates
+      },
     });
+    // #region agent log
+    debugLog('server.js:189', 'Before SMTP sendMail', { smtpHost: account.smtp_host, smtpPort: account.smtp_port, from: account.email_address, to }, 'H5');
+    // #endregion
 
     const info = await transporter.sendMail({
       from: `${account.display_name || account.email_address} <${account.email_address}>`,
@@ -195,10 +296,16 @@ async function sendEmail(accountId, { to, subject, body, isHtml = false }) {
       text: isHtml ? undefined : body,
       html: isHtml ? body : undefined,
     });
+    // #region agent log
+    debugLog('server.js:199', 'SMTP sendMail success', { messageId: info.messageId }, 'H5');
+    // #endregion
 
     console.log(`✓ Sent email from ${account.email_address}: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
+    // #region agent log
+    debugLog('server.js:201', 'sendEmail ERROR', { accountId, errorMessage: error.message, errorStack: error.stack?.substring(0, 200), errorName: error.name }, 'H5');
+    // #endregion
     console.error(`Error sending email from account ${accountId}:`, error.message);
     throw error;
   }
@@ -1221,7 +1328,13 @@ const routes = {
       
       // Test connection and initial sync
       console.log(`[ACCOUNT] Testing connection for ${email_address}...`);
+      // #region agent log
+      debugLog('server.js:1223', 'POST /mail/accounts - before sync', { accountId, email_address, imap_host, smtp_host }, 'H1,H2,H3,H4');
+      // #endregion
       const syncResult = await syncMailAccount(accountId);
+      // #region agent log
+      debugLog('server.js:1224', 'POST /mail/accounts - after sync', { success: syncResult.success, error: syncResult.error, newEmails: syncResult.newEmails }, 'H1,H2,H3,H4');
+      // #endregion
       
       if (!syncResult.success) {
         // Connection failed - delete the account and return error
@@ -1388,7 +1501,13 @@ const routes = {
       
       // Sync and wait for result
       console.log(`[SYNC] Manual sync requested for account ${account_id}`);
+      // #region agent log
+      debugLog('server.js:1391', 'POST /mail/sync START', { account_id, userId }, 'H1,H2,H3,H4');
+      // #endregion
       const result = await syncMailAccount(account_id);
+      // #region agent log
+      debugLog('server.js:1392', 'POST /mail/sync RESULT', { success: result.success, error: result.error, newEmails: result.newEmails }, 'H1,H2,H3,H4');
+      // #endregion
       
       if (!result.success) {
         return { 
@@ -1426,9 +1545,18 @@ const routes = {
       );
       if (accounts.length === 0) return { error: 'Account not found', status: 404 };
       
+      // #region agent log
+      debugLog('server.js:1440', 'POST /mail/send START', { account_id, to, subject, userId }, 'H5');
+      // #endregion
       const result = await sendEmail(account_id, { to, subject, body: emailBody, isHtml });
+      // #region agent log
+      debugLog('server.js:1441', 'POST /mail/send SUCCESS', { messageId: result.messageId }, 'H5');
+      // #endregion
       return { success: true, messageId: result.messageId };
     } catch (error) {
+      // #region agent log
+      debugLog('server.js:1442', 'POST /mail/send ERROR', { errorMessage: error.message, errorStack: error.stack?.substring(0, 200) }, 'H5');
+      // #endregion
       console.error('Send email error:', error);
       return { error: error.message || 'Failed to send email', status: 500 };
     }
