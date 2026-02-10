@@ -78,158 +78,48 @@ function decrypt(encryptedText) {
 
 // ── Mail sync and send functions ──────────────────────────────────
 
-async function syncMailAccount(accountId) {
-  let connection = null;
+// Helper function to sync a specific folder
+async function syncMailFolder(connection, account, accountId, folderName, dbFolderName) {
   try {
-    // #region agent log
-    debugLog('server.js:50', 'syncMailAccount START', { accountId }, 'H1');
-    // #endregion
-    const [accounts] = await db.execute(
-      'SELECT * FROM mail_accounts WHERE id = ?',
-      [accountId]
-    );
-    // #region agent log
-    debugLog('server.js:56', 'Account query result', { accountFound: !!accounts[0], email: accounts[0]?.email_address, hasEncryptedPassword: !!accounts[0]?.encrypted_password }, 'H4');
-    // #endregion
-    if (!accounts[0]) {
-      return { success: false, error: `Account ${accountId} not found in database` };
-    }
-
-    const account = accounts[0];
-    // #region agent log
-    debugLog('server.js:62', 'Before password decrypt', { hasEncryptedPassword: !!account.encrypted_password, imapHost: account.imap_host, imapPort: account.imap_port, username: account.username || account.email_address }, 'H2');
-    // #endregion
-    const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
-    // #region agent log
-    debugLog('server.js:63', 'After password decrypt', { passwordDecrypted: !!password, passwordLength: password?.length || 0 }, 'H2');
-    // #endregion
-    if (!password) {
-      return { success: false, error: 'No password configured for this account' };
-    }
-
-    const imapPort = account.imap_port || 993;
-    // Port 993 uses implicit SSL/TLS (like HTTPS), port 143 uses STARTTLS
-    // For imap-simple: use tls: true for both ports (library handles implicit vs STARTTLS)
-    const config = {
-      imap: {
-        user: account.username || account.email_address,
-        password,
-        host: account.imap_host,
-        port: imapPort,
-        tls: true, // Use TLS for both port 993 (implicit) and 143 (STARTTLS)
-        tlsOptions: { 
-          rejectUnauthorized: false, // Temporarily allow self-signed for debugging - Gmail should have valid certs
-          servername: account.imap_host, // SNI support for proper TLS handshake
-        },
-        connTimeout: 60000, // Connection timeout: 60 seconds
-        authTimeout: 30000, // Authentication timeout: 30 seconds
-        keepalive: true, // Keep connection alive
-      },
-    };
-    // #region agent log
-    debugLog('server.js:67', 'IMAP config before connect', { 
-      host: config.imap.host, 
-      port: config.imap.port, 
-      user: config.imap.user, 
-      hasPassword: !!config.imap.password,
-      tls: config.imap.tls,
-      tlsOptions: config.imap.tlsOptions,
-    }, 'H1');
-    // #endregion
-    console.log(`[SYNC] Connecting to ${account.email_address} at ${account.imap_host}:${account.imap_port}...`);
-    try {
-      connection = await imaps.connect(config);
-    } catch (connectError) {
-      // #region agent log
-      debugLog('server.js:132', 'IMAP connect error', { 
-        errorMessage: connectError.message, 
-        errorName: connectError.name,
-        errorStack: connectError.stack?.substring(0, 300),
-      }, 'H1');
-      // #endregion
-      throw connectError;
-    }
-    // #region agent log
-    debugLog('server.js:80', 'IMAP connected, opening INBOX', { connected: !!connection }, 'H1');
-    // #endregion
-    console.log(`[SYNC] Connected. Opening INBOX...`);
-    await connection.openBox('INBOX');
-    // #region agent log
-    debugLog('server.js:82', 'INBOX opened', {}, 'H1');
-    // #endregion
-
-    // Fetch recent emails - first get UIDs only (fast), then fetch only last 500 with bodies
-    // This avoids downloading 2500+ full messages which causes timeouts
-    console.log(`[SYNC] Getting message UIDs...`);
-    // Search for all messages - returns array of message objects with attributes.uid
+    console.log(`[SYNC] Opening ${folderName}...`);
+    await connection.openBox(folderName);
+    
     const searchResults = await connection.search(['ALL'], {});
-    // Extract UID numbers from the search results
     const uids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
-    console.log(`[SYNC] Found ${uids.length} messages in INBOX`);
-    // #region agent log
-    debugLog('server.js:91', 'IMAP UID search completed', { uidCount: uids.length, sampleUid: uids[0], sampleUidType: typeof uids[0] }, 'H1');
-    // #endregion
-
+    console.log(`[SYNC] Found ${uids.length} messages in ${folderName}`);
+    
     if (uids.length === 0) {
-      if (connection) connection.end();
-      await db.execute(
-        'UPDATE mail_accounts SET last_synced_at = UTC_TIMESTAMP() WHERE id = ?',
-        [accountId]
-      );
-      return { success: true, newEmails: 0, totalFound: 0, message: `Synced ${account.email_address}: 0 emails (empty inbox)` };
+      return { newEmails: 0, processed: 0, failed: 0, total: 0 };
     }
-
-    // Fetch emails one by one - this allows real-time progress and avoids timeout issues
-    // Take last 500 UIDs to process
+    
     const uidsToProcess = uids.slice(-500);
-    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails one by one (out of ${uids.length} total)...`);
+    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName} (out of ${uids.length} total)...`);
     
     const fetchOptions = {
-      bodies: ['HEADER', 'TEXT'], // HEADER and TEXT should be sufficient
+      bodies: ['HEADER', 'TEXT'],
       markSeen: false,
       struct: true,
     };
     
-    // #region agent log
-    debugLog('server.js:95', 'Starting one-by-one email fetch', { totalUids: uids.length, uidsToProcess: uidsToProcess.length }, 'H1');
-    // #endregion
-
     let newEmailsCount = 0;
     let processedCount = 0;
     let failedCount = 0;
-
-    // Fetch and process emails one by one
+    const uploadsDir = '/app/uploads/attachments';
+    
     for (let i = 0; i < uidsToProcess.length; i++) {
       const uid = uidsToProcess[i];
       processedCount++;
       
-      // Ensure uid is a number, not an object
       if (typeof uid !== 'number') {
-        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] Invalid UID type: ${typeof uid}, skipping`);
         failedCount++;
         continue;
       }
       
       try {
-        // Fetch single email by UID
-        // Format: ['UID', uid] searches for specific UID (uid must be a number)
         const messageResults = await connection.search([['UID', uid]], fetchOptions);
+        if (!messageResults || messageResults.length === 0) continue;
         
-        if (!messageResults || messageResults.length === 0) {
-          console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] UID ${uid}: Not found, skipping`);
-          continue;
-        }
-        
-        const item = messageResults[0]; // Should only be one result
-        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] ✓ Downloaded UID ${uid}`);
-        // #region agent log
-        debugLog('server.js:98', 'Email downloaded', { uid, processedCount, total: uidsToProcess.length, hasParts: !!item.parts, partsCount: item.parts?.length || 0 }, 'H1');
-        // #endregion
-        
-        // According to imap-simple API: search() with fetchOptions returns messages with parts array
-        // Each part has 'which' property ('HEADER', 'TEXT', etc.) and 'body' property
-        // We fetch HEADER and TEXT separately, then reconstruct the email for mailparser
-        
+        const item = messageResults[0];
         const headerPart = item.parts.find(p => p.which === 'HEADER');
         const textPart = item.parts.find(p => p.which === 'TEXT');
         
@@ -237,18 +127,13 @@ async function syncMailAccount(accountId) {
         let bodyContent = '';
         
         if (headerPart && headerPart.body) {
-          // HEADER body is parsed into an object by imap-simple
-          // Reconstruct header string for mailparser
           if (typeof headerPart.body === 'string') {
             headerContent = headerPart.body;
           } else if (typeof headerPart.body === 'object') {
-            // Reconstruct header from parsed object
             const headerLines = [];
             for (const [key, value] of Object.entries(headerPart.body)) {
               if (Array.isArray(value)) {
-                value.forEach(v => {
-                  if (v) headerLines.push(`${key}: ${v}`);
-                });
+                value.forEach(v => { if (v) headerLines.push(`${key}: ${v}`); });
               } else if (value) {
                 headerLines.push(`${key}: ${value}`);
               }
@@ -258,46 +143,28 @@ async function syncMailAccount(accountId) {
         }
         
         if (textPart && textPart.body) {
-          // TEXT body should be a string (imap-simple decodes it automatically)
           bodyContent = typeof textPart.body === 'string' ? textPart.body : String(textPart.body);
         }
         
-        // Combine header and body for mailparser (RFC822 format)
         let fullEmail = '';
         if (headerContent) {
           fullEmail = headerContent + (bodyContent ? '\r\n\r\n' + bodyContent : '');
         } else if (bodyContent) {
-          // If no header, try parsing body alone (some servers might include headers in TEXT)
           fullEmail = bodyContent;
         }
         
-        // #region agent log
-        debugLog('server.js:104', 'Before parsing email', { uid, hasHeader: !!headerContent, hasBody: !!bodyContent, headerLength: headerContent?.length || 0, bodyLength: bodyContent?.length || 0, fullEmailLength: fullEmail?.length || 0 }, 'H3');
-        // #endregion
-
-        if (!fullEmail || fullEmail.trim().length === 0) {
-          console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] Skipping UID ${uid}: no content`);
-          continue;
-        }
-
-        const parsed = await simpleParser(fullEmail);
-        // #region agent log
-        debugLog('server.js:105', 'After parsing email', { parsed: !!parsed, hasSubject: !!parsed?.subject, hasFrom: !!parsed?.from, hasText: !!parsed?.text, hasHtml: !!parsed?.html }, 'H3');
-        // #endregion
+        if (!fullEmail || fullEmail.trim().length === 0) continue;
         
-        // Extract message ID
-        const messageId = parsed.messageId || `${accountId}-${uid}`;
-
+        const parsed = await simpleParser(fullEmail);
+        const messageId = parsed.messageId || `${accountId}-${folderName}-${uid}`;
+        
         // Check if already synced
         const [existing] = await db.execute(
-          'SELECT id FROM emails WHERE message_id = ? AND mail_account_id = ?',
-          [messageId, accountId]
+          'SELECT id FROM emails WHERE message_id = ? AND mail_account_id = ? AND folder = ?',
+          [messageId, accountId, dbFolderName]
         );
-        if (existing.length > 0) {
-          console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] UID ${uid}: Already synced, skipping`);
-          continue;
-        }
-
+        if (existing.length > 0) continue;
+        
         // Extract from address and name
         let fromAddress = 'unknown';
         let fromName = null;
@@ -306,7 +173,6 @@ async function syncMailAccount(accountId) {
             fromAddress = parsed.from.value[0].address || parsed.from.text || 'unknown';
             fromName = parsed.from.value[0].name || null;
           } else if (parsed.from.text) {
-            // Try to parse "Name <email@domain.com>" format
             const textMatch = parsed.from.text.match(/^(.+?)\s*<(.+?)>$/);
             if (textMatch) {
               fromName = textMatch[1].trim();
@@ -316,25 +182,19 @@ async function syncMailAccount(accountId) {
             }
           }
         }
-
+        
         // Extract to addresses
         const toAddresses = [];
         if (parsed.to && parsed.to.value) {
           toAddresses.push(...parsed.to.value.map(t => t.address).filter(Boolean));
         }
-
+        
         // Process attachments
         const hasAttachments = parsed.attachments && parsed.attachments.length > 0;
         let attachmentCount = 0;
-        const inlineAttachments = new Map(); // Map CID to attachment ID for HTML replacement
-        
-        // Initialize processedHtml - will be modified if inline attachments exist
         let processedHtml = parsed.html || null;
         
-        // Declare uploadsDir in outer scope so it's accessible in attachment processing loop
-        const uploadsDir = '/app/uploads/attachments';
         if (hasAttachments) {
-          // Ensure uploads directory exists
           try {
             await mkdir(uploadsDir, { recursive: true });
           } catch (err) {
@@ -343,12 +203,8 @@ async function syncMailAccount(accountId) {
             }
           }
         }
-
-        // Insert email (will be updated after attachments processed if needed)
+        
         const emailId = crypto.randomUUID();
-        // #region agent log
-        debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId, fromAddress, fromName, subject: parsed.subject?.substring(0, 50), hasText: !!parsed.text, hasHtml: !!parsed.html, hasAttachments }, 'H4');
-        // #endregion
         await db.execute(
           'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, has_attachments, received_at, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
@@ -361,14 +217,14 @@ async function syncMailAccount(accountId) {
             fromName,
             JSON.stringify(toAddresses),
             parsed.text || null,
-            processedHtml, // Will be updated below if inline attachments processed
+            processedHtml,
             hasAttachments ? 1 : 0,
             parsed.date || new Date(),
-            'inbox', // Default folder
+            dbFolderName,
           ]
         );
-
-        // Save attachments and process inline images
+        
+        // Process attachments
         if (hasAttachments) {
           for (const attachment of parsed.attachments) {
             try {
@@ -376,14 +232,9 @@ async function syncMailAccount(accountId) {
               const filename = attachment.filename || attachment.cid || `attachment-${attachmentId}`;
               const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
               const storagePath = path.join(uploadsDir, `${emailId}-${attachmentId}-${safeFilename}`);
-              
-              // Check if this is an inline attachment (has contentId/cid)
-              // mailparser attachments have contentId property (the CID value without "cid:" prefix)
               const isInline = !!(attachment.contentId || attachment.cid);
               const cid = attachment.contentId || attachment.cid;
               
-              // Write attachment content to file
-              // mailparser attachments have .content which is a Buffer
               const content = attachment.content;
               let sizeBytes = 0;
               
@@ -395,7 +246,6 @@ async function syncMailAccount(accountId) {
                 await writeFile(storagePath, buffer);
                 sizeBytes = buffer.length;
               } else if (content && typeof content.pipe === 'function') {
-                // Stream - convert to buffer
                 const chunks = [];
                 for await (const chunk of content) {
                   chunks.push(chunk);
@@ -404,13 +254,11 @@ async function syncMailAccount(accountId) {
                 await writeFile(storagePath, buffer);
                 sizeBytes = buffer.length;
               } else {
-                // Try to convert to buffer
                 const buffer = Buffer.from(String(content));
                 await writeFile(storagePath, buffer);
                 sizeBytes = buffer.length;
               }
-
-              // Insert attachment record
+              
               await db.execute(
                 'INSERT INTO email_attachments (id, email_id, filename, content_type, size_bytes, storage_path, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
                 [
@@ -420,28 +268,18 @@ async function syncMailAccount(accountId) {
                   attachment.contentType || attachment.contentDisposition?.type || 'application/octet-stream',
                   attachment.size || sizeBytes,
                   storagePath,
-                  cid || null, // Store CID for inline attachments
+                  cid || null,
                 ]
               );
               
-              // If inline attachment, replace cid: references in HTML
               if (isInline && cid && processedHtml) {
                 const attachmentUrl = `/api/mail/attachments/${attachmentId}`;
-                // Escape special regex characters in CID
                 const escapedCid = cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                
-                // Replace various formats:
-                // - cid:value (most common)
-                // - "cid:value"
-                // - 'cid:value'
-                // - src="cid:value"
-                // - url('cid:value')
                 const patterns = [
-                  new RegExp(`cid:${escapedCid}`, 'gi'), // cid:value
-                  new RegExp(`"cid:${escapedCid}"`, 'gi'), // "cid:value"
-                  new RegExp(`'cid:${escapedCid}'`, 'gi'), // 'cid:value'
+                  new RegExp(`cid:${escapedCid}`, 'gi'),
+                  new RegExp(`"cid:${escapedCid}"`, 'gi'),
+                  new RegExp(`'cid:${escapedCid}'`, 'gi'),
                 ];
-                
                 patterns.forEach(pattern => {
                   processedHtml = processedHtml.replace(pattern, attachmentUrl);
                 });
@@ -449,64 +287,164 @@ async function syncMailAccount(accountId) {
               
               attachmentCount++;
             } catch (attachError) {
-              console.error(`[SYNC] Failed to save attachment ${attachment.filename || attachment.cid || 'unknown'}:`, attachError.message);
-              // Continue with other attachments
+              console.error(`[SYNC] Failed to save attachment:`, attachError.message);
             }
           }
           
-          // Update email record with processed HTML if inline attachments were processed
           if (processedHtml !== (parsed.html || null)) {
-            await db.execute(
-              'UPDATE emails SET body_html = ? WHERE id = ?',
-              [processedHtml, emailId]
-            );
+            await db.execute('UPDATE emails SET body_html = ? WHERE id = ?', [processedHtml, emailId]);
           }
         }
-
+        
         newEmailsCount++;
-        const attachMsg = attachmentCount > 0 ? ` (${attachmentCount} attachment${attachmentCount > 1 ? 's' : ''})` : '';
-        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] ✓ Stored email: "${parsed.subject || '(No subject)'}" from ${fromAddress}${attachMsg} (${newEmailsCount} new so far)`);
-        // #region agent log
-        debugLog('server.js:131', 'DB insert success', { emailId, newEmailsCount, processedCount, attachmentCount }, 'H4');
-        // #endregion
       } catch (emailError) {
         failedCount++;
-        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] ✗ Failed to process UID ${uid}:`, emailError.message);
-        // #region agent log
-        debugLog('server.js:135', 'Email processing error', { uid, errorMessage: emailError.message, errorName: emailError.name, processedCount, failedCount }, 'H1');
-        // #endregion
-        // Continue with next email instead of failing completely
         continue;
       }
     }
     
-    console.log(`[SYNC] Completed: ${newEmailsCount} new emails stored, ${failedCount} failed, ${processedCount} processed`);
-    // #region agent log
-    debugLog('server.js:140', 'Sync completed', { newEmailsCount, failedCount, processedCount, totalUids: uids.length }, 'H1');
-    // #endregion
+    return { newEmails: newEmailsCount, processed: processedCount, failed: failedCount, total: uids.length };
+  } catch (error) {
+    console.error(`[SYNC] Error syncing ${folderName}:`, error.message);
+    return { newEmails: 0, processed: 0, failed: 0, total: 0, error: error.message };
+  }
+}
 
+// Test IMAP connection and authentication without syncing
+async function testImapConnection(account) {
+  let connection = null;
+  try {
+    const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
+    if (!password) {
+      return { success: false, error: 'No password configured' };
+    }
+    
+    const imapPort = account.imap_port || 993;
+    const config = {
+      imap: {
+        user: account.username || account.email_address,
+        password,
+        host: account.imap_host,
+        port: imapPort,
+        tls: true,
+        tlsOptions: { 
+          rejectUnauthorized: false,
+          servername: account.imap_host,
+        },
+        connTimeout: 60000,
+        authTimeout: 30000,
+        keepalive: true,
+      },
+    };
+    
+    connection = await imaps.connect(config);
+    await connection.openBox('INBOX');
+    
+    // Connection successful
     if (connection) connection.end();
-
-    // Update last synced
-    await db.execute(
-      'UPDATE mail_accounts SET last_synced_at = UTC_TIMESTAMP() WHERE id = ?',
-      [accountId]
-    );
-
-    const resultMsg = `Synced ${account.email_address}: ${newEmailsCount} new emails (${uids.length} total in INBOX, ${processedCount} processed, ${failedCount} failed)`;
-    console.log(`[SYNC] ✓ ${resultMsg}`);
-    return { success: true, newEmails: newEmailsCount, totalFound: uids.length, message: resultMsg };
+    return { success: true };
   } catch (error) {
     if (connection) {
       try { connection.end(); } catch (e) { /* ignore */ }
     }
     const errorMsg = error.message || String(error);
-    // #region agent log
-    debugLog('server.js:146', 'syncMailAccount ERROR', { accountId, errorMessage: errorMsg, errorStack: error.stack?.substring(0, 200), errorName: error.name }, 'H1,H2,H3,H4');
-    // #endregion
+    
+    let friendlyError = errorMsg;
+    if (errorMsg.includes('AUTHENTICATIONFAILED') || errorMsg.includes('Invalid credentials')) {
+      friendlyError = 'Authentication failed. Check your username and password (use App Password for Gmail/Yahoo).';
+    } else if (errorMsg.includes('ETIMEDOUT') || errorMsg.includes('timeout')) {
+      friendlyError = 'Connection timeout. Check server address and port.';
+    } else if (errorMsg.includes('ENOTFOUND')) {
+      friendlyError = 'Server not found. Check the IMAP host address.';
+    } else if (errorMsg.includes('ECONNREFUSED')) {
+      friendlyError = 'Connection refused. Check the IMAP port and server settings.';
+    } else if (errorMsg.includes('Connection ended unexpectedly') || errorMsg.includes('ECONNRESET')) {
+      friendlyError = 'Connection closed by server. Check your credentials and server settings.';
+    }
+    
+    return { success: false, error: friendlyError, details: errorMsg };
+  }
+}
+
+async function syncMailAccount(accountId) {
+  let connection = null;
+  try {
+    debugLog('server.js:50', 'syncMailAccount START', { accountId }, 'H1');
+    const [accounts] = await db.execute('SELECT * FROM mail_accounts WHERE id = ?', [accountId]);
+    if (!accounts[0]) {
+      return { success: false, error: `Account ${accountId} not found in database` };
+    }
+    
+    const account = accounts[0];
+    const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
+    if (!password) {
+      return { success: false, error: 'No password configured for this account' };
+    }
+    
+    const imapPort = account.imap_port || 993;
+    const config = {
+      imap: {
+        user: account.username || account.email_address,
+        password,
+        host: account.imap_host,
+        port: imapPort,
+        tls: true,
+        tlsOptions: { 
+          rejectUnauthorized: false,
+          servername: account.imap_host,
+        },
+        connTimeout: 60000,
+        authTimeout: 30000,
+        keepalive: true,
+      },
+    };
+    
+    console.log(`[SYNC] Connecting to ${account.email_address}...`);
+    connection = await imaps.connect(config);
+    
+    // Sync INBOX
+    const inboxResult = await syncMailFolder(connection, account, accountId, 'INBOX', 'inbox');
+    
+    // Sync Sent folder (try common names)
+    let sentResult = { newEmails: 0, processed: 0, failed: 0, total: 0 };
+    try {
+      // Try common Sent folder names
+      const sentFolderNames = ['Sent', 'Sent Messages', '[Gmail]/Sent Mail'];
+      for (const folderName of sentFolderNames) {
+        try {
+          sentResult = await syncMailFolder(connection, account, accountId, folderName, 'sent');
+          if (!sentResult.error) break; // Success, stop trying
+        } catch (e) {
+          // Try next folder name
+          continue;
+        }
+      }
+    } catch (sentError) {
+      console.log(`[SYNC] Could not sync Sent folder: ${sentError.message}`);
+    }
+    
+    if (connection) connection.end();
+    
+    // Update last synced
+    await db.execute(
+      'UPDATE mail_accounts SET last_synced_at = UTC_TIMESTAMP() WHERE id = ?',
+      [accountId]
+    );
+    
+    const totalNew = inboxResult.newEmails + sentResult.newEmails;
+    const totalProcessed = inboxResult.processed + sentResult.processed;
+    const totalFailed = inboxResult.failed + sentResult.failed;
+    const resultMsg = `Synced ${account.email_address}: ${totalNew} new emails (${inboxResult.total} in INBOX, ${sentResult.total} in Sent, ${totalProcessed} processed, ${totalFailed} failed)`;
+    console.log(`[SYNC] ✓ ${resultMsg}`);
+    return { success: true, newEmails: totalNew, totalFound: inboxResult.total + sentResult.total, message: resultMsg };
+  } catch (error) {
+    if (connection) {
+      try { connection.end(); } catch (e) { /* ignore */ }
+    }
+    const errorMsg = error.message || String(error);
+    debugLog('server.js:146', 'syncMailAccount ERROR', { accountId, errorMessage: errorMsg, errorName: error.name }, 'H1,H2,H3,H4');
     console.error(`[SYNC] ✗ Error syncing account ${accountId}:`, errorMsg);
     
-    // Provide user-friendly error messages
     let friendlyError = errorMsg;
     if (errorMsg.includes('AUTHENTICATIONFAILED') || errorMsg.includes('Invalid credentials')) {
       friendlyError = 'Authentication failed. Check your username and password (use App Password for Gmail/Yahoo).';
@@ -1651,43 +1589,50 @@ const routes = {
         return { error: 'IMAP and SMTP server addresses are required', status: 400 };
       }
       
-      const accountId = crypto.randomUUID();
-      const actualUsername = username || email_address; // fallback to email if no username
-      await db.execute(
-        'INSERT INTO mail_accounts (id, user_id, email_address, display_name, provider, username, imap_host, imap_port, smtp_host, smtp_port, encrypted_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [accountId, userId, email_address, display_name || null, provider, actualUsername, imap_host || null, imap_port || 993, smtp_host || null, smtp_port || 587, encrypted_password ? encrypt(encrypted_password) : null]
-      );
+      // Create temporary account object for testing
+      const tempAccount = {
+        email_address,
+        username: username || email_address,
+        imap_host,
+        imap_port: imap_port || 993,
+        encrypted_password: encrypt(encrypted_password),
+      };
       
-      const [accounts] = await db.execute('SELECT id, user_id, email_address, display_name, provider, is_active FROM mail_accounts WHERE id = ?', [accountId]);
+      // Test IMAP connection/auth first (fast, non-blocking)
+      console.log(`[ACCOUNT] Testing IMAP connection for ${email_address}...`);
+      const testResult = await testImapConnection(tempAccount);
       
-      // Test connection and initial sync
-      console.log(`[ACCOUNT] Testing connection for ${email_address}...`);
-      // #region agent log
-      debugLog('server.js:1223', 'POST /mail/accounts - before sync', { accountId, email_address, imap_host, smtp_host }, 'H1,H2,H3,H4');
-      // #endregion
-      const syncResult = await syncMailAccount(accountId);
-      // #region agent log
-      debugLog('server.js:1224', 'POST /mail/accounts - after sync', { success: syncResult.success, error: syncResult.error, newEmails: syncResult.newEmails }, 'H1,H2,H3,H4');
-      // #endregion
-      
-      if (!syncResult.success) {
-        // Connection failed - delete the account and return error
-        await db.execute('DELETE FROM mail_accounts WHERE id = ?', [accountId]);
+      if (!testResult.success) {
+        // Auth failed - return error immediately without saving account
         return { 
-          error: syncResult.error, 
-          details: syncResult.details,
+          error: testResult.error, 
+          details: testResult.details,
           status: 400 
         };
       }
       
+      // Auth successful - save account immediately
+      const accountId = crypto.randomUUID();
+      const actualUsername = username || email_address;
+      await db.execute(
+        'INSERT INTO mail_accounts (id, user_id, email_address, display_name, provider, username, imap_host, imap_port, smtp_host, smtp_port, encrypted_password) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [accountId, userId, email_address, display_name || null, provider, actualUsername, imap_host || null, imap_port || 993, smtp_host || null, smtp_port || 587, tempAccount.encrypted_password]
+      );
+      
+      const [accounts] = await db.execute('SELECT id, user_id, email_address, display_name, provider, is_active FROM mail_accounts WHERE id = ?', [accountId]);
+      
+      // Start sync in background (non-blocking)
+      console.log(`[ACCOUNT] Starting background sync for ${email_address}...`);
+      syncMailAccount(accountId).catch(err => {
+        console.error(`[ACCOUNT] Background sync failed for ${email_address}:`, err.message);
+      });
+      
+      // Return success immediately
       return { 
-        account: accounts[0], 
-        syncResult: {
-          success: true,
-          newEmails: syncResult.newEmails,
-          totalFound: syncResult.totalFound,
-          message: syncResult.message
-        }
+        account: accounts[0],
+        authSuccess: true,
+        syncInProgress: true,
+        message: 'Account connected successfully. Syncing emails in the background — this may take several minutes for large mailboxes.'
       };
     } catch (error) {
       console.error('[ACCOUNT] Create mail account error:', error);
@@ -1776,7 +1721,27 @@ const routes = {
         params.push(accountId);
       }
       
-      query += ' ORDER BY received_at DESC LIMIT 100';
+      // Pagination
+      const limit = parseInt(url.searchParams.get('limit') || '50', 10);
+      const offset = parseInt(url.searchParams.get('offset') || '0', 10);
+      const page = Math.max(1, Math.floor(offset / limit) + 1);
+      
+      query += ' ORDER BY received_at DESC LIMIT ? OFFSET ?';
+      params.push(limit, offset);
+      
+      // Get total count for pagination
+      let countQuery = 'SELECT COUNT(*) as total FROM emails WHERE user_id = ?';
+      const countParams = [userId];
+      if (folder) {
+        countQuery += ' AND folder = ?';
+        countParams.push(folder);
+      }
+      if (accountId) {
+        countQuery += ' AND mail_account_id = ?';
+        countParams.push(accountId);
+      }
+      const [countResult] = await db.execute(countQuery, countParams);
+      const total = countResult[0]?.total || 0;
       
       const [emails] = await db.execute(query, params);
       // Parse JSON fields
@@ -1786,7 +1751,16 @@ const routes = {
         is_read: !!email.is_read,
         is_starred: !!email.is_starred,
       }));
-      return { emails: parsedEmails };
+      return { 
+        emails: parsedEmails,
+        pagination: {
+          total,
+          limit,
+          offset,
+          page,
+          totalPages: Math.ceil(total / limit),
+        }
+      };
     } catch (error) {
       return { error: 'Failed to get emails', status: 500 };
     }
@@ -2200,7 +2174,13 @@ async function handleRequest(req, res) {
   } else if (routeKey.includes('/api/mail/accounts/')) {
     routeKey = `${req.method} /api/mail/accounts/:id`;
   } else if (routeKey.includes('/api/mail/emails/')) {
-    if (url.pathname.includes('/read')) {
+    if (url.pathname.includes('/bulk-delete')) {
+      routeKey = `${req.method} /api/mail/emails/bulk-delete`;
+    } else if (url.pathname.includes('/bulk-move')) {
+      routeKey = `${req.method} /api/mail/emails/bulk-move`;
+    } else if (url.pathname.includes('/bulk-update')) {
+      routeKey = `${req.method} /api/mail/emails/bulk-update`;
+    } else if (url.pathname.includes('/read')) {
       routeKey = `${req.method} /api/mail/emails/:id/read`;
     } else if (url.pathname.includes('/star')) {
       routeKey = `${req.method} /api/mail/emails/:id/star`;

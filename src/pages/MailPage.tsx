@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { Button } from '@/components/ui/button';
@@ -21,6 +21,14 @@ import {
   DropdownMenuItem, 
   DropdownMenuTrigger 
 } from '@/components/ui/dropdown-menu';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from '@/components/ui/pagination';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -51,7 +59,8 @@ import {
   FolderOpen,
   CheckCircle2,
   Paperclip,
-  Download
+  Download,
+  Search
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format } from 'date-fns';
@@ -123,6 +132,8 @@ const MailPage = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set());
   const [contextMenuEmail, setContextMenuEmail] = useState<{ email: Email; x: number; y: number } | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [emailPage, setEmailPage] = useState(1);
   const [composeForm, setComposeForm] = useState({
     to: '',
     subject: '',
@@ -182,19 +193,24 @@ const MailPage = () => {
     }
   }, [selectedAccount]);
 
-  // Clear selection when folder changes
+  // Clear selection and reset page when folder or account changes
   useEffect(() => {
     setSelectedEmails(new Set());
+    setEmailPage(1);
   }, [selectedFolder, selectedAccount]);
 
-  // Fetch emails for selected account
-  const { data: emails = [], isLoading: emailsLoading } = useQuery({
-    queryKey: ['emails', selectedAccount, selectedFolder],
+  // Fetch emails for selected account with pagination
+  const emailsPerPage = 50;
+  const { data: emailsData, isLoading: emailsLoading } = useQuery({
+    queryKey: ['emails', selectedAccount, selectedFolder, emailPage],
     queryFn: async () => {
-      if (!selectedAccount) return [];
+      if (!selectedAccount) return { emails: [], pagination: null };
       
       const folder = selectedFolder === 'starred' ? 'inbox' : selectedFolder;
-      const response = await api.get<{ emails: Email[] }>(`/mail/emails?account_id=${selectedAccount}&folder=${folder}`);
+      const offset = (emailPage - 1) * emailsPerPage;
+      const response = await api.get<{ emails: Email[]; pagination?: { total: number; limit: number; offset: number; page: number; totalPages: number } }>(
+        `/mail/emails?account_id=${selectedAccount}&folder=${folder}&limit=${emailsPerPage}&offset=${offset}`
+      );
       if (response.error) throw new Error(response.error);
       let emails = response.data?.emails || [];
       
@@ -202,10 +218,31 @@ const MailPage = () => {
         emails = emails.filter(e => e.is_starred);
       }
       
-      return emails;
+      return { emails, pagination: response.data?.pagination || null };
     },
     enabled: !!selectedAccount,
   });
+
+  const allEmails = emailsData?.emails || [];
+  const pagination = emailsData?.pagination;
+
+  // Filter emails based on search query
+  const emails = React.useMemo(() => {
+    if (!searchQuery.trim()) return allEmails;
+    
+    const query = searchQuery.toLowerCase();
+    return allEmails.filter(email => {
+      const subject = (email.subject || '').toLowerCase();
+      const fromName = (email.from_name || '').toLowerCase();
+      const fromAddress = (email.from_address || '').toLowerCase();
+      const bodyText = (email.body_text || '').toLowerCase();
+      
+      return subject.includes(query) || 
+             fromName.includes(query) || 
+             fromAddress.includes(query) ||
+             bodyText.includes(query);
+    });
+  }, [allEmails, searchQuery]);
 
   // Add mail account mutation
   const addAccount = useMutation({
@@ -225,13 +262,18 @@ const MailPage = () => {
       queryClient.invalidateQueries({ queryKey: ['mail-accounts-count'] });
       queryClient.invalidateQueries({ queryKey: ['stats'] });
       
-      // Handle timeout case (sync in progress)
+      // Show success immediately with green checkmark
       const syncMsg = data?.syncInProgress 
-        ? data.message || 'Account added. Email sync is running in the background — this may take several minutes for large mailboxes.'
-        : data?.syncResult?.message || 'Account added';
+        ? data.message || 'Syncing emails in the background. First sync will take a long time.'
+        : 'Account connected successfully';
       
       toast({ 
-        title: '✓ Account connected successfully', 
+        title: (
+          <div className="flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-green-500" />
+            <span>Account connected successfully</span>
+          </div>
+        ),
         description: syncMsg,
         duration: 10000,
       });
@@ -388,11 +430,23 @@ const MailPage = () => {
     mutationFn: async ({ emailIds, is_read }: { emailIds: string[]; is_read: boolean }) => {
       const response = await api.post('/mail/emails/bulk-update', { email_ids: emailIds, is_read });
       if (response.error) throw new Error(response.error);
+      return response.data;
     },
-    onSuccess: () => {
+    onSuccess: (data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['emails'] });
       queryClient.invalidateQueries({ queryKey: ['stats'] });
       setSelectedEmails(new Set());
+      toast({ 
+        title: `✓ Marked ${variables.emailIds.length} email(s) as ${variables.is_read ? 'read' : 'unread'}`,
+        duration: 3000,
+      });
+    },
+    onError: (error: Error) => {
+      toast({ 
+        title: 'Failed to mark emails as read', 
+        description: error.message, 
+        variant: 'destructive' 
+      });
     },
   });
 
@@ -888,14 +942,15 @@ const MailPage = () => {
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="h-14 border-b border-border flex items-center justify-between px-4">
-          <div className="flex items-center gap-2">
+        <div className="h-14 border-b border-border flex items-center justify-between px-4 gap-4">
+          <div className="flex items-center gap-2 flex-1 min-w-0">
             {emails.length > 0 && (
               <Button
                 variant="ghost"
                 size="icon"
                 onClick={handleSelectAll}
                 title={selectedEmails.size === emails.length ? 'Deselect all' : 'Select all'}
+                className="shrink-0"
               >
                 {selectedEmails.size === emails.length ? (
                   <CheckSquare className="h-4 w-4" />
@@ -904,11 +959,33 @@ const MailPage = () => {
                 )}
               </Button>
             )}
-            <h2 className="font-semibold capitalize">{selectedFolder}</h2>
+            <h2 className="font-semibold capitalize shrink-0">{selectedFolder}</h2>
             {selectedEmails.size > 0 && (
-              <span className="text-sm text-muted-foreground">
+              <span className="text-sm text-muted-foreground shrink-0">
                 ({selectedEmails.size} selected)
               </span>
+            )}
+            {selectedAccount && (
+              <div className="relative flex-1 max-w-md ml-4">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  type="text"
+                  placeholder="Search emails..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-9 h-9"
+                />
+                {searchQuery && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 h-7 w-7"
+                    onClick={() => setSearchQuery('')}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                )}
+              </div>
             )}
           </div>
           <div className="flex items-center gap-2">
@@ -1101,6 +1178,67 @@ const MailPage = () => {
                   </motion.div>
                 ))}
               </AnimatePresence>
+            </div>
+          )}
+          
+          {/* Pagination */}
+          {pagination && pagination.totalPages > 1 && (
+            <div className="border-t border-border p-4">
+              <Pagination>
+                <PaginationContent>
+                  <PaginationItem>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setEmailPage(p => Math.max(1, p - 1))}
+                      disabled={emailPage === 1}
+                      className="gap-1"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      Previous
+                    </Button>
+                  </PaginationItem>
+                  {Array.from({ length: Math.min(5, pagination.totalPages) }, (_, i) => {
+                    let pageNum;
+                    if (pagination.totalPages <= 5) {
+                      pageNum = i + 1;
+                    } else if (emailPage <= 3) {
+                      pageNum = i + 1;
+                    } else if (emailPage >= pagination.totalPages - 2) {
+                      pageNum = pagination.totalPages - 4 + i;
+                    } else {
+                      pageNum = emailPage - 2 + i;
+                    }
+                    return (
+                      <PaginationItem key={pageNum}>
+                        <Button
+                          variant={emailPage === pageNum ? 'outline' : 'ghost'}
+                          size="icon"
+                          onClick={() => setEmailPage(pageNum)}
+                          className={emailPage === pageNum ? 'font-semibold' : ''}
+                        >
+                          {pageNum}
+                        </Button>
+                      </PaginationItem>
+                    );
+                  })}
+                  <PaginationItem>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setEmailPage(p => Math.min(pagination.totalPages, p + 1))}
+                      disabled={emailPage === pagination.totalPages}
+                      className="gap-1"
+                    >
+                      Next
+                      <ChevronRight className="h-4 w-4" />
+                    </Button>
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
+              <div className="text-center text-sm text-muted-foreground mt-2">
+                Page {pagination.page} of {pagination.totalPages} ({pagination.total} emails)
+              </div>
             </div>
           )}
         </div>
