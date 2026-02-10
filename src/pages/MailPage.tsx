@@ -49,7 +49,9 @@ import {
   CheckSquare,
   Square,
   FolderOpen,
-  CheckCircle2
+  CheckCircle2,
+  Paperclip,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format } from 'date-fns';
@@ -62,6 +64,13 @@ interface MailAccount {
   provider: string;
   is_active: boolean;
   last_synced_at: string | null;
+}
+
+interface EmailAttachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
 }
 
 interface Email {
@@ -77,6 +86,8 @@ interface Email {
   is_read: boolean;
   is_starred: boolean;
   received_at: string;
+  has_attachments?: boolean;
+  attachments?: EmailAttachment[];
 }
 
 const mailProviders = [
@@ -1073,9 +1084,16 @@ const MailPage = () => {
                           {format(new Date(email.received_at), 'MMM d, yyyy')}
                         </span>
                       </div>
-                      <p className={`truncate ${!email.is_read ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
-                        {email.subject || '(No subject)'}
-                      </p>
+                      <div className="flex items-center gap-2">
+                        <p className={`truncate flex-1 ${!email.is_read ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
+                          {email.subject || '(No subject)'}
+                        </p>
+                        {email.has_attachments && (
+                          <span title="Has attachments" className="shrink-0">
+                            <Paperclip className="h-3.5 w-3.5 text-muted-foreground" />
+                          </span>
+                        )}
+                      </div>
                       <p className="text-sm text-muted-foreground truncate mt-0.5">
                         {email.body_text?.substring(0, 100) || '(No content)'}
                       </p>
@@ -1265,6 +1283,42 @@ const MailPage = () => {
                     </div>
                   </div>
                 </div>
+
+                {/* Attachments */}
+                {selectedEmail.attachments && selectedEmail.attachments.length > 0 && (
+                  <div className="border-t border-border pt-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Paperclip className="h-4 w-4 text-muted-foreground" />
+                      <span className="text-sm font-medium text-foreground">
+                        Attachments ({selectedEmail.attachments.length})
+                      </span>
+                    </div>
+                    <div className="space-y-2">
+                      {selectedEmail.attachments.map((attachment) => {
+                        const sizeKB = attachment.size_bytes ? (attachment.size_bytes / 1024).toFixed(1) : '?';
+                        return (
+                          <a
+                            key={attachment.id}
+                            href={`/api/mail/attachments/${attachment.id}`}
+                            download={attachment.filename}
+                            className="flex items-center gap-3 p-3 border border-border rounded-lg hover:bg-muted/50 transition-colors group"
+                          >
+                            <Paperclip className="h-5 w-5 text-muted-foreground shrink-0" />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium text-foreground truncate">
+                                {attachment.filename}
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                {attachment.content_type} • {sizeKB} KB
+                              </p>
+                            </div>
+                            <Download className="h-4 w-4 text-muted-foreground group-hover:text-accent transition-colors shrink-0" />
+                          </a>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
                 
                 <div className="border-t border-border pt-4">
                   {selectedEmail.body_html ? (

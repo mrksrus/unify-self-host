@@ -11,6 +11,11 @@ const imaps = require('imap-simple');
 const { simpleParser } = require('mailparser');
 const fs = require('fs');
 const path = require('path');
+const { promisify } = require('util');
+
+const writeFile = promisify(fs.writeFile);
+const mkdir = promisify(fs.mkdir);
+const readFile = promisify(fs.readFile);
 
 // Debug logging helper - write to container filesystem and console
 const DEBUG_LOG_PATH = '/app/debug.log';
@@ -318,13 +323,30 @@ async function syncMailAccount(accountId) {
           toAddresses.push(...parsed.to.value.map(t => t.address).filter(Boolean));
         }
 
+        // Process attachments
+        const hasAttachments = parsed.attachments && parsed.attachments.length > 0;
+        let attachmentCount = 0;
+        const inlineAttachments = new Map(); // Map CID to attachment ID for HTML replacement
+        
+        if (hasAttachments) {
+          // Ensure uploads directory exists
+          const uploadsDir = '/app/uploads/attachments';
+          try {
+            await mkdir(uploadsDir, { recursive: true });
+          } catch (err) {
+            if (err.code !== 'EEXIST') {
+              console.error(`[SYNC] Failed to create uploads directory:`, err.message);
+            }
+          }
+        }
+
         // Insert email
         const emailId = crypto.randomUUID();
         // #region agent log
-        debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId, fromAddress, fromName, subject: parsed.subject?.substring(0, 50), hasText: !!parsed.text, hasHtml: !!parsed.html }, 'H4');
+        debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId, fromAddress, fromName, subject: parsed.subject?.substring(0, 50), hasText: !!parsed.text, hasHtml: !!parsed.html, hasAttachments }, 'H4');
         // #endregion
         await db.execute(
-          'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, has_attachments, received_at, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
           [
             emailId,
             account.user_id,
@@ -335,14 +357,106 @@ async function syncMailAccount(accountId) {
             fromName,
             JSON.stringify(toAddresses),
             parsed.text || null,
-            parsed.html || null,
+            processedHtml || parsed.html || null, // Use processed HTML with replaced inline image URLs
+            hasAttachments ? 1 : 0,
             parsed.date || new Date(),
+            'inbox', // Default folder
           ]
         );
+
+        // Save attachments and process inline images
+        let processedHtml = parsed.html || null;
+        if (hasAttachments) {
+          for (const attachment of parsed.attachments) {
+            try {
+              const attachmentId = crypto.randomUUID();
+              const filename = attachment.filename || attachment.cid || `attachment-${attachmentId}`;
+              const safeFilename = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+              const storagePath = path.join(uploadsDir, `${emailId}-${attachmentId}-${safeFilename}`);
+              
+              // Check if this is an inline attachment (has contentId/cid)
+              // mailparser attachments have contentId property (the CID value without "cid:" prefix)
+              const isInline = !!(attachment.contentId || attachment.cid);
+              const cid = attachment.contentId || attachment.cid;
+              
+              // Write attachment content to file
+              // mailparser attachments have .content which is a Buffer
+              const content = attachment.content;
+              let sizeBytes = 0;
+              
+              if (Buffer.isBuffer(content)) {
+                await writeFile(storagePath, content);
+                sizeBytes = content.length;
+              } else if (typeof content === 'string') {
+                const buffer = Buffer.from(content, 'utf8');
+                await writeFile(storagePath, buffer);
+                sizeBytes = buffer.length;
+              } else if (content && typeof content.pipe === 'function') {
+                // Stream - convert to buffer
+                const chunks = [];
+                for await (const chunk of content) {
+                  chunks.push(chunk);
+                }
+                const buffer = Buffer.concat(chunks);
+                await writeFile(storagePath, buffer);
+                sizeBytes = buffer.length;
+              } else {
+                // Try to convert to buffer
+                const buffer = Buffer.from(String(content));
+                await writeFile(storagePath, buffer);
+                sizeBytes = buffer.length;
+              }
+
+              // Insert attachment record
+              await db.execute(
+                'INSERT INTO email_attachments (id, email_id, filename, content_type, size_bytes, storage_path, content_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [
+                  attachmentId,
+                  emailId,
+                  filename,
+                  attachment.contentType || attachment.contentDisposition?.type || 'application/octet-stream',
+                  attachment.size || sizeBytes,
+                  storagePath,
+                  cid || null, // Store CID for inline attachments
+                ]
+              );
+              
+              // If inline attachment, replace cid: references in HTML
+              if (isInline && cid && processedHtml) {
+                const attachmentUrl = `/api/mail/attachments/${attachmentId}`;
+                // Escape special regex characters in CID
+                const escapedCid = cid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                
+                // Replace various formats:
+                // - cid:value (most common)
+                // - "cid:value"
+                // - 'cid:value'
+                // - src="cid:value"
+                // - url('cid:value')
+                const patterns = [
+                  new RegExp(`cid:${escapedCid}`, 'gi'), // cid:value
+                  new RegExp(`"cid:${escapedCid}"`, 'gi'), // "cid:value"
+                  new RegExp(`'cid:${escapedCid}'`, 'gi'), // 'cid:value'
+                ];
+                
+                patterns.forEach(pattern => {
+                  processedHtml = processedHtml.replace(pattern, attachmentUrl);
+                });
+              }
+              
+              attachmentCount++;
+            } catch (attachError) {
+              console.error(`[SYNC] Failed to save attachment ${attachment.filename || attachment.cid || 'unknown'}:`, attachError.message);
+              // Continue with other attachments
+            }
+          }
+        }
+
         newEmailsCount++;
-        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] ✓ Stored email: "${parsed.subject || '(No subject)'}" from ${fromAddress} (${newEmailsCount} new so far)`);
+        const attachMsg = attachmentCount > 0 ? ` (${attachmentCount} attachment${attachmentCount > 1 ? 's' : ''})` : '';
+        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] ✓ Stored email: "${parsed.subject || '(No subject)'}" from ${fromAddress}${attachMsg} (${newEmailsCount} new so far)`);
         // #region agent log
-        debugLog('server.js:131', 'DB insert success', { emailId, newEmailsCount, processedCount }, 'H4');
+        debugLog('server.js:131', 'DB insert success', { emailId, newEmailsCount, processedCount, attachmentCount }, 'H4');
         // #endregion
       } catch (emailError) {
         failedCount++;
@@ -669,9 +783,11 @@ async function ensureSchema() {
     content_type VARCHAR(100),
     size_bytes BIGINT,
     storage_path TEXT,
+    content_id VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (email_id) REFERENCES emails(id) ON DELETE CASCADE,
-    INDEX idx_attachments_email (email_id)
+    INDEX idx_attachments_email (email_id),
+    INDEX idx_attachments_content_id (content_id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
 
   await db.execute(`CREATE TABLE IF NOT EXISTS system_settings (
@@ -1688,9 +1804,70 @@ const routes = {
         is_starred: !!email.is_starred,
       };
       
+      // Fetch attachments (exclude inline attachments from list - they're embedded in HTML)
+      const [attachments] = await db.execute(
+        'SELECT id, filename, content_type, size_bytes, content_id FROM email_attachments WHERE email_id = ? ORDER BY filename',
+        [id]
+      );
+      
+      // Separate inline and regular attachments
+      const inlineAttachments = attachments.filter(att => att.content_id);
+      const regularAttachments = attachments.filter(att => !att.content_id);
+      
+      parsedEmail.attachments = regularAttachments.map(att => ({
+        id: att.id,
+        filename: att.filename,
+        content_type: att.content_type,
+        size_bytes: att.size_bytes,
+      }));
+      
+      // Note: Inline attachments are already embedded in body_html via URL replacement
+      
       return { email: parsedEmail };
     } catch (error) {
       return { error: 'Failed to get email', status: 500 };
+    }
+  },
+
+  'GET /api/mail/attachments/:id': async (req, userId, body, res) => {
+    if (!userId) return { error: 'Unauthorized', status: 401 };
+    
+    try {
+      const parts = req.url.split('?')[0].split('/');
+      const attachmentId = parts[parts.length - 1];
+      
+      // Get attachment info and verify it belongs to user's email
+      const [attachments] = await db.execute(
+        `SELECT a.id, a.filename, a.content_type, a.storage_path, e.user_id 
+         FROM email_attachments a
+         INNER JOIN emails e ON a.email_id = e.id
+         WHERE a.id = ? AND e.user_id = ?`,
+        [attachmentId, userId]
+      );
+      
+      if (attachments.length === 0) {
+        return { error: 'Attachment not found', status: 404 };
+      }
+      
+      const attachment = attachments[0];
+      
+      // Read file from storage
+      try {
+        const fileContent = await readFile(attachment.storage_path);
+        
+        // Return as raw response for download
+        return {
+          __raw: fileContent,
+          __contentType: attachment.content_type || 'application/octet-stream',
+          __filename: attachment.filename,
+        };
+      } catch (fileError) {
+        console.error(`[ATTACH] Failed to read attachment file:`, fileError.message);
+        return { error: 'Failed to read attachment file', status: 500 };
+      }
+    } catch (error) {
+      console.error('[ATTACH] Error:', error);
+      return { error: 'Failed to fetch attachment', status: 500 };
     }
   },
   
