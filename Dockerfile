@@ -12,8 +12,8 @@ RUN npm run build
 # ── Stage 2: Production image (Nginx + Node.js API) ───────────────
 FROM node:20-alpine
 
-# Install nginx and temporary build deps for native node modules
-RUN apk add --no-cache nginx \
+# Install nginx, wget (for healthcheck), and temporary build deps for native node modules
+RUN apk add --no-cache nginx wget \
     && apk add --no-cache --virtual .build-deps python3 make g++
 
 # ── Set up the API ─────────────────────────────────────────────────
