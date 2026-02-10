@@ -102,15 +102,26 @@ async function syncMailAccount(accountId) {
       return { success: false, error: 'No password configured for this account' };
     }
 
+    const imapPort = account.imap_port || 993;
+    // Port 993 uses implicit SSL/TLS (like HTTPS), port 143 uses STARTTLS
+    const useSecure = imapPort === 993;
+    const useTLS = imapPort === 143;
+    
     const config = {
       imap: {
         user: account.username || account.email_address,
         password,
         host: account.imap_host,
-        port: account.imap_port || 993,
-        tls: true,
-        tlsOptions: { rejectUnauthorized: false },
-        authTimeout: 15000,
+        port: imapPort,
+        secure: useSecure, // Implicit SSL/TLS for port 993
+        tls: useTLS, // STARTTLS for port 143
+        tlsOptions: { 
+          rejectUnauthorized: false, // Allow self-signed certificates
+          servername: account.imap_host, // SNI support for proper TLS handshake
+        },
+        connTimeout: 60000, // Connection timeout: 60 seconds
+        authTimeout: 30000, // Authentication timeout: 30 seconds
+        keepalive: true, // Keep connection alive
       },
     };
     // #region agent log
@@ -154,21 +165,49 @@ async function syncMailAccount(accountId) {
     for (const item of messages) {
       const uid = item.attributes.uid;
       
-      // Extract header and body from parts
-      // When using bodies: ['HEADER', 'TEXT'], item.parts contains objects with 'which' and 'body'
-      const headerPart = item.parts.find(p => p.which === 'HEADER');
-      const textPart = item.parts.find(p => p.which === 'TEXT');
+      // Extract parts using imap-simple helper functions
+      const parts = imaps.getParts(item.attributes.struct);
       
-      // Get header and body content
-      const headerContent = headerPart?.body || '';
-      const bodyContent = textPart?.body || '';
+      // Find header and body parts
+      const headerPart = parts.find(p => p.which === 'HEADER');
+      const textPart = parts.find(p => p.which === 'TEXT');
+      
+      // Get header and body content using getPartData
+      let headerContent = '';
+      let bodyContent = '';
+      
+      try {
+        if (headerPart) {
+          headerContent = await imaps.getPartData(item, headerPart);
+        }
+        if (textPart) {
+          bodyContent = await imaps.getPartData(item, textPart);
+        }
+      } catch (err) {
+        console.log(`[SYNC] Error getting parts for message ${uid}:`, err.message);
+        // Try alternative: get the full message body directly
+        const allParts = parts.filter(p => p.which === '' || p.which === 'TEXT');
+        if (allParts.length > 0) {
+          try {
+            bodyContent = await imaps.getPartData(item, allParts[0]);
+          } catch (e) {
+            console.log(`[SYNC] Failed to get body for message ${uid}`);
+          }
+        }
+      }
       
       // Combine header and body for parsing (RFC822 format)
-      // Headers end with \r\n\r\n, then body follows
-      const fullEmail = headerContent + (bodyContent ? '\r\n' + bodyContent : '');
+      // If we have header, combine it with body. Otherwise, try parsing body alone
+      let fullEmail = '';
+      if (headerContent) {
+        fullEmail = headerContent + (bodyContent ? '\r\n\r\n' + bodyContent : '');
+      } else if (bodyContent) {
+        // If no header, try to parse body directly (some servers return full message)
+        fullEmail = bodyContent;
+      }
       
       // #region agent log
-      debugLog('server.js:104', 'Before parsing email', { uid, hasHeader: !!headerContent, hasBody: !!bodyContent, fullEmailLength: fullEmail?.length || 0 }, 'H3');
+      debugLog('server.js:104', 'Before parsing email', { uid, hasHeader: !!headerContent, hasBody: !!bodyContent, headerLength: headerContent?.length || 0, bodyLength: bodyContent?.length || 0, fullEmailLength: fullEmail?.length || 0 }, 'H3');
       // #endregion
 
       if (!fullEmail || fullEmail.trim().length === 0) {
@@ -178,9 +217,11 @@ async function syncMailAccount(accountId) {
 
       const parsed = await simpleParser(fullEmail);
       // #region agent log
-      debugLog('server.js:105', 'After parsing email', { parsed: !!parsed, hasSubject: !!parsed?.subject, hasFrom: !!parsed?.from }, 'H3');
+      debugLog('server.js:105', 'After parsing email', { parsed: !!parsed, hasSubject: !!parsed?.subject, hasFrom: !!parsed?.from, hasText: !!parsed?.text, hasHtml: !!parsed?.html }, 'H3');
       // #endregion
-      const messageId = parsed.messageId || `${account.id}-${id}`;
+      
+      // Extract message ID
+      const messageId = parsed.messageId || `${accountId}-${uid}`;
 
       // Check if already synced
       const [existing] = await db.execute(
@@ -189,10 +230,35 @@ async function syncMailAccount(accountId) {
       );
       if (existing.length > 0) continue;
 
+      // Extract from address and name
+      let fromAddress = 'unknown';
+      let fromName = null;
+      if (parsed.from) {
+        if (parsed.from.value && parsed.from.value.length > 0) {
+          fromAddress = parsed.from.value[0].address || parsed.from.text || 'unknown';
+          fromName = parsed.from.value[0].name || null;
+        } else if (parsed.from.text) {
+          // Try to parse "Name <email@domain.com>" format
+          const textMatch = parsed.from.text.match(/^(.+?)\s*<(.+?)>$/);
+          if (textMatch) {
+            fromName = textMatch[1].trim();
+            fromAddress = textMatch[2].trim();
+          } else {
+            fromAddress = parsed.from.text;
+          }
+        }
+      }
+
+      // Extract to addresses
+      const toAddresses = [];
+      if (parsed.to && parsed.to.value) {
+        toAddresses.push(...parsed.to.value.map(t => t.address).filter(Boolean));
+      }
+
       // Insert email
       const emailId = crypto.randomUUID();
       // #region agent log
-      debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId }, 'H4');
+      debugLog('server.js:116', 'Before DB insert', { emailId, userId: account.user_id, accountId, messageId, fromAddress, fromName, subject: parsed.subject?.substring(0, 50), hasText: !!parsed.text, hasHtml: !!parsed.html }, 'H4');
       // #endregion
       await db.execute(
         'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
@@ -202,9 +268,9 @@ async function syncMailAccount(accountId) {
           accountId,
           messageId,
           parsed.subject || '(No subject)',
-          parsed.from?.value?.[0]?.address || parsed.from?.text || 'unknown',
-          parsed.from?.value?.[0]?.name || null,
-          JSON.stringify((parsed.to?.value || []).map(t => t.address)),
+          fromAddress,
+          fromName,
+          JSON.stringify(toAddresses),
           parsed.text || null,
           parsed.html || null,
           parsed.date || new Date(),
@@ -272,18 +338,23 @@ async function sendEmail(accountId, { to, subject, body, isHtml = false }) {
     if (!password) throw new Error('No password configured');
 
     const smtpPort = account.smtp_port || 587;
+    // Port 465 uses implicit SSL/TLS, port 587 uses STARTTLS
     const transporter = nodemailer.createTransport({
       host: account.smtp_host,
       port: smtpPort,
-      secure: smtpPort === 465, // SSL/TLS for port 465
-      requireTLS: smtpPort === 587, // STARTTLS for port 587
+      secure: smtpPort === 465, // Implicit SSL/TLS for port 465
+      requireTLS: smtpPort === 587, // Require STARTTLS for port 587
       auth: {
         user: account.username || account.email_address,
         pass: password,
       },
       tls: {
         rejectUnauthorized: false, // Allow self-signed certificates
+        servername: account.smtp_host, // SNI support for proper TLS handshake
       },
+      connectionTimeout: 60000, // Connection timeout: 60 seconds
+      greetingTimeout: 30000, // Greeting timeout: 30 seconds
+      socketTimeout: 60000, // Socket timeout: 60 seconds
     });
     // #region agent log
     debugLog('server.js:189', 'Before SMTP sendMail', { smtpHost: account.smtp_host, smtpPort: account.smtp_port, from: account.email_address, to }, 'H5');
@@ -1445,9 +1516,45 @@ const routes = {
       query += ' ORDER BY received_at DESC LIMIT 100';
       
       const [emails] = await db.execute(query, params);
-      return { emails };
+      // Parse JSON fields
+      const parsedEmails = emails.map(email => ({
+        ...email,
+        to_addresses: typeof email.to_addresses === 'string' ? JSON.parse(email.to_addresses || '[]') : email.to_addresses,
+        is_read: !!email.is_read,
+        is_starred: !!email.is_starred,
+      }));
+      return { emails: parsedEmails };
     } catch (error) {
       return { error: 'Failed to get emails', status: 500 };
+    }
+  },
+  
+  'GET /api/mail/emails/:id': async (req, userId) => {
+    if (!userId) return { error: 'Unauthorized', status: 401 };
+    
+    try {
+      const id = req.url.split('/').pop();
+      const [emails] = await db.execute(
+        'SELECT * FROM emails WHERE id = ? AND user_id = ?',
+        [id, userId]
+      );
+      
+      if (emails.length === 0) {
+        return { error: 'Email not found', status: 404 };
+      }
+      
+      const email = emails[0];
+      // Parse JSON fields
+      const parsedEmail = {
+        ...email,
+        to_addresses: typeof email.to_addresses === 'string' ? JSON.parse(email.to_addresses || '[]') : email.to_addresses,
+        is_read: !!email.is_read,
+        is_starred: !!email.is_starred,
+      };
+      
+      return { email: parsedEmail };
+    } catch (error) {
+      return { error: 'Failed to get email', status: 500 };
     }
   },
   

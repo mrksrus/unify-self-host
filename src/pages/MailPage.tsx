@@ -22,6 +22,7 @@ import {
   DropdownMenuTrigger 
 } from '@/components/ui/dropdown-menu';
 import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
@@ -38,10 +39,14 @@ import {
   PenSquare,
   MoreVertical,
   X,
-  Edit
+  Edit,
+  Reply,
+  Forward,
+  ArrowLeft
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format } from 'date-fns';
+import { useIsMobile } from '@/hooks/use-mobile';
 
 interface MailAccount {
   id: string;
@@ -60,6 +65,7 @@ interface Email {
   from_name: string | null;
   to_addresses: string[];
   body_text: string | null;
+  body_html: string | null;
   folder: string;
   is_read: boolean;
   is_starred: boolean;
@@ -86,10 +92,14 @@ const folders = [
 const MailPage = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const isMobile = useIsMobile();
   const [selectedAccount, setSelectedAccount] = useState<string | null>(null);
   const [selectedFolder, setSelectedFolder] = useState('inbox');
+  const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [isAddAccountOpen, setIsAddAccountOpen] = useState(false);
   const [isComposeOpen, setIsComposeOpen] = useState(false);
+  const [composeMode, setComposeMode] = useState<'new' | 'reply' | 'forward'>('new');
+  const [isReplying, setIsReplying] = useState(false);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
   const [editingAccount, setEditingAccount] = useState<MailAccount | null>(null);
   const [composeForm, setComposeForm] = useState({
@@ -344,6 +354,8 @@ const MailPage = () => {
     onSuccess: () => {
       toast({ title: '✓ Email sent successfully' });
       setIsComposeOpen(false);
+      setIsReplying(false);
+      setComposeMode('new');
       setComposeForm({ to: '', subject: '', body: '' });
     },
     onError: (error: Error) => {
@@ -729,7 +741,21 @@ const MailPage = () => {
                     className={`flex items-start gap-4 p-4 hover:bg-muted/50 cursor-pointer transition-colors ${
                       !email.is_read ? 'bg-accent/5' : ''
                     }`}
-                    onClick={() => !email.is_read && markAsRead.mutate(email.id)}
+                    onClick={async () => {
+                      // Mark as read if unread
+                      if (!email.is_read) {
+                        markAsRead.mutate(email.id);
+                      }
+                      // Fetch full email and open reader
+                      try {
+                        const response = await api.get<{ email: Email }>(`/mail/emails/${email.id}`);
+                        if (response.data?.email) {
+                          setSelectedEmail(response.data.email);
+                        }
+                      } catch (error) {
+                        toast({ title: 'Failed to load email', variant: 'destructive' });
+                      }
+                    }}
                   >
                     <Button
                       variant="ghost"
@@ -744,14 +770,19 @@ const MailPage = () => {
                     </Button>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-2 mb-1">
-                        <span className={`font-medium truncate ${!email.is_read ? 'text-foreground' : 'text-muted-foreground'}`}>
-                          {email.from_name || email.from_address}
-                        </span>
+                        <div className="flex items-center gap-2 min-w-0">
+                          {!email.is_read && (
+                            <span className="h-2 w-2 rounded-full bg-accent shrink-0" />
+                          )}
+                          <span className={`font-medium truncate ${!email.is_read ? 'text-foreground font-semibold' : 'text-muted-foreground'}`}>
+                            {email.from_name || email.from_address}
+                          </span>
+                        </div>
                         <span className="text-xs text-muted-foreground shrink-0">
                           {format(new Date(email.received_at), 'MMM d')}
                         </span>
                       </div>
-                      <p className={`truncate ${!email.is_read ? 'text-foreground' : 'text-muted-foreground'}`}>
+                      <p className={`truncate ${!email.is_read ? 'text-foreground font-medium' : 'text-muted-foreground'}`}>
                         {email.subject || '(No subject)'}
                       </p>
                       <p className="text-sm text-muted-foreground truncate mt-0.5">
@@ -788,68 +819,293 @@ const MailPage = () => {
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Compose Dialog */}
-      <Dialog open={isComposeOpen} onOpenChange={setIsComposeOpen}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>New Message</DialogTitle>
+      {/* Email Reader */}
+      {selectedEmail && (
+        <div className="fixed inset-0 z-50 bg-background">
+          <div className="flex flex-col h-full">
+            {/* Header */}
+            <div className="border-b border-border p-4 flex items-center justify-between">
+              <div className="flex items-center gap-4">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => {
+                    setSelectedEmail(null);
+                    setIsReplying(false);
+                    setComposeForm({ to: '', subject: '', body: '' });
+                    setComposeMode('new');
+                  }}
+                >
+                  <ArrowLeft className="h-5 w-5" />
+                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setComposeMode('reply');
+                      if (!selectedAccount) {
+                        setSelectedAccount(selectedEmail.mail_account_id);
+                      }
+                      setComposeForm({
+                        to: selectedEmail.from_address,
+                        subject: `Re: ${selectedEmail.subject || ''}`,
+                        body: `\n\n--- Original Message ---\nFrom: ${selectedEmail.from_name || selectedEmail.from_address}\nDate: ${format(new Date(selectedEmail.received_at), 'PPpp')}\n\n${selectedEmail.body_text || ''}`,
+                      });
+                      if (isMobile) {
+                        setIsComposeOpen(true);
+                      } else {
+                        setIsReplying(true);
+                      }
+                    }}
+                  >
+                    <Reply className="h-4 w-4 mr-2" />
+                    Reply
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setComposeMode('forward');
+                      if (!selectedAccount) {
+                        setSelectedAccount(selectedEmail.mail_account_id);
+                      }
+                      setComposeForm({
+                        to: '',
+                        subject: `Fwd: ${selectedEmail.subject || ''}`,
+                        body: `\n\n--- Forwarded Message ---\nFrom: ${selectedEmail.from_name || selectedEmail.from_address}\nDate: ${format(new Date(selectedEmail.received_at), 'PPpp')}\n\n${selectedEmail.body_text || ''}`,
+                      });
+                      if (isMobile) {
+                        setIsComposeOpen(true);
+                      } else {
+                        setIsReplying(true);
+                      }
+                    }}
+                  >
+                    <Forward className="h-4 w-4 mr-2" />
+                    Forward
+                  </Button>
+                </div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => toggleStar.mutate({ id: selectedEmail.id, is_starred: !selectedEmail.is_starred })}
+              >
+                <Star className={`h-5 w-5 ${selectedEmail.is_starred ? 'fill-warning text-warning' : 'text-muted-foreground'}`} />
+              </Button>
+            </div>
+            
+            {/* Email Content */}
+            <div className={`flex-1 overflow-auto p-6 ${!isMobile && isReplying ? 'pb-0' : ''}`}>
+              <div className="max-w-4xl mx-auto space-y-4">
+                <div>
+                  <h1 className="text-2xl font-bold mb-4">{selectedEmail.subject || '(No subject)'}</h1>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <div>
+                      <span className="font-medium text-foreground">From:</span> {selectedEmail.from_name ? `${selectedEmail.from_name} <${selectedEmail.from_address}>` : selectedEmail.from_address}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">To:</span> {selectedEmail.to_addresses?.join(', ') || 'N/A'}
+                    </div>
+                    <div>
+                      <span className="font-medium text-foreground">Date:</span> {format(new Date(selectedEmail.received_at), 'PPpp')}
+                    </div>
+                  </div>
+                </div>
+                
+                <div className="border-t border-border pt-4">
+                  {selectedEmail.body_html ? (
+                    <div 
+                      className="prose prose-sm max-w-none dark:prose-invert prose-headings:text-foreground prose-p:text-foreground prose-a:text-accent prose-strong:text-foreground prose-code:text-foreground"
+                      style={{
+                        maxWidth: '100%',
+                        wordBreak: 'break-word',
+                      }}
+                      dangerouslySetInnerHTML={{ __html: selectedEmail.body_html }}
+                    />
+                  ) : (
+                    <div className="whitespace-pre-wrap text-foreground break-words">
+                      {selectedEmail.body_text || '(No content)'}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Desktop: Inline Compose Editor */}
+            {!isMobile && isReplying && (
+              <div className="border-t border-border bg-card">
+                <div className="p-4 max-w-4xl mx-auto">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-semibold">
+                      {composeMode === 'reply' ? 'Reply' : composeMode === 'forward' ? 'Forward' : 'Compose'}
+                    </h2>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => {
+                        setIsReplying(false);
+                        setComposeForm({ to: '', subject: '', body: '' });
+                        setComposeMode('new');
+                      }}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <form onSubmit={handleSendEmail} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="compose-to-inline">To</Label>
+                      <Input 
+                        id="compose-to-inline"
+                        type="email"
+                        placeholder="recipient@example.com"
+                        value={composeForm.to}
+                        onChange={(e) => setComposeForm({ ...composeForm, to: e.target.value })}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="compose-subject-inline">Subject</Label>
+                      <Input 
+                        id="compose-subject-inline"
+                        placeholder="Enter subject"
+                        value={composeForm.subject}
+                        onChange={(e) => setComposeForm({ ...composeForm, subject: e.target.value })}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="compose-body-inline">Message</Label>
+                      <Textarea 
+                        id="compose-body-inline"
+                        className="min-h-[300px]"
+                        placeholder="Write your message..."
+                        value={composeForm.body}
+                        onChange={(e) => setComposeForm({ ...composeForm, body: e.target.value })}
+                        required
+                      />
+                    </div>
+                    <div className="flex justify-end gap-3">
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        onClick={() => {
+                          setIsReplying(false);
+                          setComposeForm({ to: '', subject: '', body: '' });
+                          setComposeMode('new');
+                        }}
+                      >
+                        Cancel
+                      </Button>
+                      <Button type="submit" disabled={sendEmailMutation.isPending}>
+                        {sendEmailMutation.isPending ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Sending...
+                          </>
+                        ) : (
+                          <>
+                            <Send className="h-4 w-4 mr-2" />
+                            Send
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Compose Dialog - Mobile or New Message */}
+      <Dialog open={isComposeOpen} onOpenChange={(open) => {
+        setIsComposeOpen(open);
+        if (!open) {
+          setComposeMode('new');
+          setComposeForm({ to: '', subject: '', body: '' });
+          setIsReplying(false);
+        }
+      }}>
+        <DialogContent className={`${isMobile ? 'max-w-full h-[95vh] max-h-[95vh] flex flex-col p-4 translate-y-[-47.5%] top-[47.5%] rounded-t-lg rounded-b-none' : 'sm:max-w-2xl'}`}>
+          <DialogHeader className="shrink-0">
+            <DialogTitle>
+              {composeMode === 'reply' ? 'Reply' : composeMode === 'forward' ? 'Forward' : 'New Message'}
+            </DialogTitle>
           </DialogHeader>
-          <form onSubmit={handleSendEmail} className="space-y-4 mt-4">
-            <div className="space-y-2">
-              <Label>From</Label>
-              <Select value={selectedAccount || ''} onValueChange={setSelectedAccount}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select account" />
-                </SelectTrigger>
-                <SelectContent>
-                  {accounts.map((account) => (
-                    <SelectItem key={account.id} value={account.id}>
-                      {account.email_address}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+          <form onSubmit={handleSendEmail} className={`space-y-4 mt-4 ${isMobile ? 'flex-1 flex flex-col min-h-0 overflow-hidden' : ''}`}>
+            <div className={`space-y-4 ${isMobile ? 'shrink-0' : ''}`}>
+              <div className="space-y-2">
+                <Label>From</Label>
+                <Select value={selectedAccount || ''} onValueChange={setSelectedAccount}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select account" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {accounts.map((account) => (
+                      <SelectItem key={account.id} value={account.id}>
+                        {account.email_address}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="compose-to">To</Label>
+                <Input 
+                  id="compose-to"
+                  type="email"
+                  placeholder="recipient@example.com"
+                  value={composeForm.to}
+                  onChange={(e) => setComposeForm({ ...composeForm, to: e.target.value })}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="compose-subject">Subject</Label>
+                <Input 
+                  id="compose-subject"
+                  placeholder="Enter subject"
+                  value={composeForm.subject}
+                  onChange={(e) => setComposeForm({ ...composeForm, subject: e.target.value })}
+                  required
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="compose-to">To</Label>
-              <Input 
-                id="compose-to"
-                type="email"
-                placeholder="recipient@example.com"
-                value={composeForm.to}
-                onChange={(e) => setComposeForm({ ...composeForm, to: e.target.value })}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="compose-subject">Subject</Label>
-              <Input 
-                id="compose-subject"
-                placeholder="Enter subject"
-                value={composeForm.subject}
-                onChange={(e) => setComposeForm({ ...composeForm, subject: e.target.value })}
-                required
-              />
-            </div>
-            <div className="space-y-2">
+            <div className={`space-y-2 ${isMobile ? 'flex-1 flex flex-col min-h-0' : ''}`}>
               <Label htmlFor="compose-body">Message</Label>
-              <textarea 
+              <Textarea 
                 id="compose-body"
-                className="w-full min-h-[200px] p-3 rounded-md border border-input bg-background resize-none focus:outline-none focus:ring-2 focus:ring-ring"
+                className={`${isMobile ? 'flex-1 min-h-[200px] resize-none' : 'min-h-[200px]'}`}
                 placeholder="Write your message..."
                 value={composeForm.body}
                 onChange={(e) => setComposeForm({ ...composeForm, body: e.target.value })}
                 required
               />
             </div>
-            <div className="flex justify-end gap-3">
-              <Button type="button" variant="outline" onClick={() => setIsComposeOpen(false)}>
+            <div className={`flex justify-end gap-3 ${isMobile ? 'shrink-0 pt-4 border-t border-border' : ''}`}>
+              <Button type="button" variant="outline" onClick={() => {
+                setIsComposeOpen(false);
+                setComposeMode('new');
+                setComposeForm({ to: '', subject: '', body: '' });
+                setIsReplying(false);
+              }}>
                 Cancel
               </Button>
               <Button type="submit" disabled={sendEmailMutation.isPending}>
-                {sendEmailMutation.isPending && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                <Send className="h-4 w-4 mr-2" />
-                Send
+                {sendEmailMutation.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Sending...
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-4 w-4 mr-2" />
+                    Send
+                  </>
+                )}
               </Button>
             </div>
           </form>
