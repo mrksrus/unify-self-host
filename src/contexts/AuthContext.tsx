@@ -54,7 +54,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signUp = async (email: string, password: string, fullName: string) => {
-    const response = await api.post<{ token?: string; user?: User; requiresApproval?: boolean; message?: string }>('/auth/signup', {
+    const response = await api.post<{ token?: string; csrfToken?: string; user?: User; requiresApproval?: boolean; message?: string }>('/auth/signup', {
       email,
       password,
       full_name: fullName,
@@ -71,6 +71,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (response.data?.token && response.data?.user) {
       api.setToken(response.data.token);
+      if (response.data.csrfToken) {
+        api.setCsrfToken(response.data.csrfToken);
+      }
       setUser(response.data.user);
       setSession({ token: response.data.token });
       return { error: null };
@@ -80,7 +83,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signIn = async (email: string, password: string) => {
-    const response = await api.post<{ token: string; user: User }>('/auth/signin', {
+    const response = await api.post<{ token: string; csrfToken?: string; user: User }>('/auth/signin', {
       email,
       password,
     });
@@ -91,6 +94,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     if (response.data?.token && response.data?.user) {
       api.setToken(response.data.token);
+      if (response.data.csrfToken) {
+        api.setCsrfToken(response.data.csrfToken);
+      }
       setUser(response.data.user);
       setSession({ token: response.data.token });
       return { error: null };
@@ -102,6 +108,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signOut = async () => {
     await api.post('/auth/signout');
     api.setToken(null);
+    api.setCsrfToken(null);
     setUser(null);
     setSession(null);
   };

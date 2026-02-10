@@ -11,6 +11,7 @@ interface ApiResponse<T> {
 class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
+  private csrfToken: string | null = null;
 
   constructor(baseUrl: string = API_URL) {
     this.baseUrl = baseUrl;
@@ -26,7 +27,12 @@ class ApiClient {
       localStorage.setItem('auth_token', token);
     } else if (typeof window !== 'undefined') {
       localStorage.removeItem('auth_token');
+      this.csrfToken = null; // Clear CSRF token on logout
     }
+  }
+
+  setCsrfToken(token: string | null) {
+    this.csrfToken = token;
   }
 
   private async request<T>(
@@ -42,6 +48,12 @@ class ApiClient {
 
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
+    }
+
+    // Add CSRF token for state-changing requests (POST, PUT, DELETE)
+    const method = options.method?.toUpperCase() || 'GET';
+    if (this.csrfToken && ['POST', 'PUT', 'DELETE'].includes(method)) {
+      headers['X-CSRF-Token'] = this.csrfToken;
     }
 
     try {

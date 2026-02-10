@@ -154,25 +154,26 @@ async function syncMailAccount(accountId) {
     // #endregion
 
     // Fetch recent emails (no date filter - avoids SINCE format issues across providers)
-    // First, search for all message UIDs
-    const uids = await connection.search(['ALL'], {});
-    console.log(`[SYNC] Found ${uids.length} messages in INBOX`);
-    // #region agent log
-    debugLog('server.js:91', 'IMAP search completed', { uidCount: uids.length }, 'H1');
-    // #endregion
-
-    // Take last 500 to avoid overwhelming the database
-    const uidsToSync = uids.slice(-500);
-    
-    // Now fetch the actual messages with their bodies
+    // imap-simple's search method with fetchOptions returns messages directly
+    // Using '' in bodies gets the full message (useful for mailparser), HEADER and TEXT are alternatives
     const fetchOptions = {
-      bodies: ['HEADER', 'TEXT'],
+      bodies: ['HEADER', 'TEXT', ''], // '' gets full message, HEADER/TEXT are parsed alternatives
       markSeen: false,
       struct: true,
     };
-    const messages = await connection.fetch(uidsToSync, fetchOptions);
+    
+    // Search for all messages and fetch their content
+    // This returns messages with their bodies, not just UIDs
+    const allMessages = await connection.search(['ALL'], fetchOptions);
+    console.log(`[SYNC] Found ${allMessages.length} messages in INBOX`);
     // #region agent log
-    debugLog('server.js:99', 'IMAP fetch completed', { messageCount: messages.length }, 'H1');
+    debugLog('server.js:91', 'IMAP search completed', { messageCount: allMessages.length }, 'H1');
+    // #endregion
+
+    // Take last 500 to avoid overwhelming the database
+    const messages = allMessages.slice(-500);
+    // #region agent log
+    debugLog('server.js:99', 'Messages sliced to last 500', { totalMessages: allMessages.length, messagesToProcess: messages.length }, 'H1');
     // #endregion
 
     let newEmailsCount = 0;
@@ -180,45 +181,54 @@ async function syncMailAccount(accountId) {
     for (const item of messages) {
       const uid = item.attributes.uid;
       
-      // Extract parts using imap-simple helper functions
-      const parts = imaps.getParts(item.attributes.struct);
+      // According to imap-simple API: search() with fetchOptions returns messages with parts array
+      // Each part has 'which' property ('HEADER', 'TEXT', '', etc.) and 'body' property
+      // For mailparser, we can use the full message (which === '') or reconstruct from HEADER + TEXT
       
-      // Find header and body parts
-      const headerPart = parts.find(p => p.which === 'HEADER');
-      const textPart = parts.find(p => p.which === 'TEXT');
+      // Try to get full message first (which === ''), as shown in mailparser example
+      const fullPart = item.parts.find(p => p.which === '');
+      let fullEmail = '';
       
-      // Get header and body content using getPartData
-      let headerContent = '';
-      let bodyContent = '';
-      
-      try {
-        if (headerPart) {
-          headerContent = await imaps.getPartData(item, headerPart);
-        }
-        if (textPart) {
-          bodyContent = await imaps.getPartData(item, textPart);
-        }
-      } catch (err) {
-        console.log(`[SYNC] Error getting parts for message ${uid}:`, err.message);
-        // Try alternative: get the full message body directly
-        const allParts = parts.filter(p => p.which === '' || p.which === 'TEXT');
-        if (allParts.length > 0) {
-          try {
-            bodyContent = await imaps.getPartData(item, allParts[0]);
-          } catch (e) {
-            console.log(`[SYNC] Failed to get body for message ${uid}`);
+      if (fullPart && fullPart.body) {
+        // Full message body - add UID header for mailparser as shown in GitHub example
+        const idHeader = `Imap-Id: ${uid}\r\n`;
+        fullEmail = idHeader + (typeof fullPart.body === 'string' ? fullPart.body : String(fullPart.body));
+      } else {
+        // Fallback: reconstruct from HEADER + TEXT parts
+        const headerPart = item.parts.find(p => p.which === 'HEADER');
+        const textPart = item.parts.find(p => p.which === 'TEXT');
+        
+        let headerContent = '';
+        let bodyContent = '';
+        
+        if (headerPart && headerPart.body) {
+          // HEADER body is parsed into an object by imap-simple
+          // Reconstruct header string for mailparser
+          if (typeof headerPart.body === 'string') {
+            headerContent = headerPart.body;
+          } else if (typeof headerPart.body === 'object') {
+            const headerLines = [];
+            for (const [key, value] of Object.entries(headerPart.body)) {
+              if (Array.isArray(value)) {
+                value.forEach(v => headerLines.push(`${key}: ${v}`));
+              } else if (value) {
+                headerLines.push(`${key}: ${value}`);
+              }
+            }
+            headerContent = headerLines.join('\r\n');
           }
         }
-      }
-      
-      // Combine header and body for parsing (RFC822 format)
-      // If we have header, combine it with body. Otherwise, try parsing body alone
-      let fullEmail = '';
-      if (headerContent) {
-        fullEmail = headerContent + (bodyContent ? '\r\n\r\n' + bodyContent : '');
-      } else if (bodyContent) {
-        // If no header, try to parse body directly (some servers return full message)
-        fullEmail = bodyContent;
+        
+        if (textPart && textPart.body) {
+          bodyContent = typeof textPart.body === 'string' ? textPart.body : String(textPart.body);
+        }
+        
+        // Combine header and body
+        if (headerContent) {
+          fullEmail = headerContent + (bodyContent ? '\r\n\r\n' + bodyContent : '');
+        } else if (bodyContent) {
+          fullEmail = bodyContent;
+        }
       }
       
       // #region agent log
@@ -305,9 +315,9 @@ async function syncMailAccount(accountId) {
       [accountId]
     );
 
-    const resultMsg = `Synced ${account.email_address}: ${newEmailsCount} new emails (${messages.length} total in INBOX)`;
+    const resultMsg = `Synced ${account.email_address}: ${newEmailsCount} new emails (${allMessages.length} total in INBOX)`;
     console.log(`[SYNC] ✓ ${resultMsg}`);
-    return { success: true, newEmails: newEmailsCount, totalFound: messages.length, message: resultMsg };
+    return { success: true, newEmails: newEmailsCount, totalFound: allMessages.length, message: resultMsg };
   } catch (error) {
     if (connection) {
       try { connection.end(); } catch (e) { /* ignore */ }
@@ -653,6 +663,11 @@ async function verifyPassword(password, hash) {
   return bcrypt.compare(password, hash);
 }
 
+// Generate CSRF token
+function generateCsrfToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
 // Generate JWT token
 function generateToken(userId) {
   return jwt.sign(
@@ -715,6 +730,45 @@ setInterval(() => {
     }
   }
 }, 3600000);
+
+// CSRF token validation
+function validateCsrfToken(req, res) {
+  // Skip CSRF for GET, HEAD, OPTIONS requests
+  const method = req.method.toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    return true;
+  }
+
+  // Skip CSRF for auth endpoints (they generate new tokens)
+  const url = req.url.split('?')[0];
+  if (url === '/api/auth/signin' || url === '/api/auth/signup') {
+    return true;
+  }
+
+  // Get CSRF token from cookie and header
+  const cookieToken = req.headers.cookie
+    ?.split(';')
+    .find(c => c.trim().startsWith('csrf-token='))
+    ?.split('=')[1];
+  const headerToken = req.headers['x-csrf-token'];
+
+  // Both must be present and match
+  if (!cookieToken || !headerToken || cookieToken !== headerToken) {
+    return false;
+  }
+
+  return true;
+}
+
+// Set CSRF token cookie
+function setCsrfCookie(res, token) {
+  const expires = new Date();
+  expires.setDate(expires.getDate() + 21); // Match JWT expiry
+  // Note: Secure flag requires HTTPS. For HTTP (development), remove Secure flag
+  const isSecure = process.env.NODE_ENV === 'production';
+  const secureFlag = isSecure ? 'Secure;' : '';
+  res.setHeader('Set-Cookie', `csrf-token=${token}; HttpOnly; ${secureFlag} SameSite=Strict; Path=/; Expires=${expires.toUTCString()}`);
+}
 
 // JWT verification + session check
 async function verifyToken(authHeader) {
@@ -894,7 +948,7 @@ const routes = {
   'GET /health': async () => ({ status: 'ok', timestamp: new Date().toISOString() }),
   
   // Authentication endpoints
-  'POST /api/auth/signup': async (req, userId, body) => {
+  'POST /api/auth/signup': async (req, userId, body, res) => {
     const ip = getClientIP(req);
     const blockedMinutes = isRateLimited(ip);
     if (blockedMinutes) {
@@ -942,6 +996,7 @@ const routes = {
       }
       
       const token = generateToken(newUserId);
+      const csrfToken = generateCsrfToken();
       
       // Create session
       const expiresAt = getSessionExpiry();
@@ -951,7 +1006,10 @@ const routes = {
       );
       
       resetRateLimit(ip);
-      return { token, user: { id: newUserId, email, full_name, role: 'user' } };
+      const result = { token, csrfToken, user: { id: newUserId, email, full_name, role: 'user' } };
+      // Set CSRF cookie in response
+      setCsrfCookie(res, csrfToken);
+      return result;
     } catch (error) {
       console.error('Signup error:', error);
       recordFailedAttempt(ip);
@@ -959,7 +1017,7 @@ const routes = {
     }
   },
   
-  'POST /api/auth/signin': async (req, userId, body) => {
+  'POST /api/auth/signin': async (req, userId, body, res) => {
     const ip = getClientIP(req);
     const blockedMinutes = isRateLimited(ip);
     if (blockedMinutes) {
@@ -995,6 +1053,7 @@ const routes = {
       }
       
       const token = generateToken(user.id);
+      const csrfToken = generateCsrfToken();
       
       // Create session
       const expiresAt = getSessionExpiry();
@@ -1004,7 +1063,10 @@ const routes = {
       );
       
       resetRateLimit(ip);
-      return { token, user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role } };
+      const result = { token, csrfToken, user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role } };
+      // Set CSRF cookie in response
+      setCsrfCookie(res, csrfToken);
+      return result;
     } catch (error) {
       console.error('Signin error:', error);
       recordFailedAttempt(ip);
@@ -1012,7 +1074,7 @@ const routes = {
     }
   },
   
-  'POST /api/auth/signout': async (req, userId) => {
+  'POST /api/auth/signout': async (req, userId, body, res) => {
     if (!userId) return { error: 'Unauthorized', status: 401 };
     
     try {
@@ -1822,7 +1884,8 @@ async function handleRequest(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-CSRF-Token');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -1840,6 +1903,13 @@ async function handleRequest(req, res) {
   try {
     const userId = await verifyToken(req.headers.authorization);
 
+    // Validate CSRF token for authenticated state-changing requests
+    if (userId && !validateCsrfToken(req, res)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'CSRF token validation failed', status: 403 }));
+      return;
+    }
+
     // Allow larger bodies for vCard import
     const maxBodySize = routeKey === 'POST /api/contacts/import' ? 500000 : 1000;
     const body = await parseBody(req, maxBodySize);
@@ -1850,7 +1920,7 @@ async function handleRequest(req, res) {
       return;
     }
 
-    const result = await handler(req, userId, body);
+    const result = await handler(req, userId, body, res);
 
     // Raw response (used by vCard export)
     if (result.__raw) {
