@@ -268,12 +268,7 @@ const MailPage = () => {
         : 'Account connected successfully';
       
       toast({ 
-        title: (
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="h-5 w-5 text-green-500" />
-            <span>Account connected successfully</span>
-          </div>
-        ),
+        title: '✓ Account connected successfully',
         description: syncMsg,
         duration: 10000,
       });
