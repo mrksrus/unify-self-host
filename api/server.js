@@ -104,19 +104,16 @@ async function syncMailAccount(accountId) {
 
     const imapPort = account.imap_port || 993;
     // Port 993 uses implicit SSL/TLS (like HTTPS), port 143 uses STARTTLS
-    const useSecure = imapPort === 993;
-    const useTLS = imapPort === 143;
-    
+    // For imap-simple: use tls: true for both ports (library handles implicit vs STARTTLS)
     const config = {
       imap: {
         user: account.username || account.email_address,
         password,
         host: account.imap_host,
         port: imapPort,
-        secure: useSecure, // Implicit SSL/TLS for port 993
-        tls: useTLS, // STARTTLS for port 143
+        tls: true, // Use TLS for both port 993 (implicit) and 143 (STARTTLS)
         tlsOptions: { 
-          rejectUnauthorized: false, // Allow self-signed certificates
+          rejectUnauthorized: false, // Temporarily allow self-signed for debugging - Gmail should have valid certs
           servername: account.imap_host, // SNI support for proper TLS handshake
         },
         connTimeout: 60000, // Connection timeout: 60 seconds
@@ -125,10 +122,28 @@ async function syncMailAccount(accountId) {
       },
     };
     // #region agent log
-    debugLog('server.js:67', 'IMAP config before connect', { host: config.imap.host, port: config.imap.port, user: config.imap.user, hasPassword: !!config.imap.password }, 'H1');
+    debugLog('server.js:67', 'IMAP config before connect', { 
+      host: config.imap.host, 
+      port: config.imap.port, 
+      user: config.imap.user, 
+      hasPassword: !!config.imap.password,
+      tls: config.imap.tls,
+      tlsOptions: config.imap.tlsOptions,
+    }, 'H1');
     // #endregion
     console.log(`[SYNC] Connecting to ${account.email_address} at ${account.imap_host}:${account.imap_port}...`);
-    connection = await imaps.connect(config);
+    try {
+      connection = await imaps.connect(config);
+    } catch (connectError) {
+      // #region agent log
+      debugLog('server.js:132', 'IMAP connect error', { 
+        errorMessage: connectError.message, 
+        errorName: connectError.name,
+        errorStack: connectError.stack?.substring(0, 300),
+      }, 'H1');
+      // #endregion
+      throw connectError;
+    }
     // #region agent log
     debugLog('server.js:80', 'IMAP connected, opening INBOX', { connected: !!connection }, 'H1');
     // #endregion
@@ -313,6 +328,8 @@ async function syncMailAccount(accountId) {
       friendlyError = 'Server not found. Check the IMAP host address.';
     } else if (errorMsg.includes('ECONNREFUSED')) {
       friendlyError = 'Connection refused. Check the IMAP port and server settings.';
+    } else if (errorMsg.includes('Connection ended unexpectedly') || errorMsg.includes('ECONNRESET')) {
+      friendlyError = 'Connection closed by server. This may indicate:\n1. Gmail requires an App Password (not your regular password)\n2. "Less secure app access" needs to be enabled\n3. Network/firewall blocking port 993\n4. Account security settings blocking the connection';
     }
     
     return { success: false, error: friendlyError, details: errorMsg };
