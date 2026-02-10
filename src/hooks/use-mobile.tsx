@@ -5,7 +5,7 @@ import * as React from "react";
 // - iPhone 13: 390px
 // - Pixel 8a: ~412px  
 // - Larger phones/tablets: up to ~1024px
-const MOBILE_BREAKPOINT = 1024;
+const MOBILE_BREAKPOINT = 1200;
 
 export function useIsMobile() {
   const [isMobile, setIsMobile] = React.useState<boolean | undefined>(undefined);
