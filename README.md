@@ -12,6 +12,31 @@ Intention then is it be able to install the app as a PWA and implement more feat
 So indead of having to setup your phone or PC very time for your Accounts, you can just set them up once, and access via one login. 
 Security vulnerabilty given one Account accesses potentially multiple ones... should be clear. Set a fricking good password!
 
+## Mail Sync Details
+
+UniHub supports email account management with full IMAP/SMTP sync functionality:
+
+- **Supported Providers**: Gmail, Apple/iCloud, Yahoo, and any standard IMAP/SMTP provider
+- **Sync Behavior**: 
+  - Automatically syncs every 10 minutes in the background
+  - Manual sync available via UI button
+  - Fetches last 500 emails per account (most recent first)
+  - One-by-one email fetching for reliability and real-time progress
+- **Email Features**:
+  - Read emails with HTML/plain text rendering
+  - Reply and forward functionality
+  - Mark as read/unread
+  - Star/unstar emails
+  - Responsive compose UI (popup on mobile, inline on desktop)
+- **Security**: 
+  - Email passwords encrypted with AES-256-GCM
+  - CSRF protection implemented
+  - Requires App Passwords for Gmail/Yahoo/iCloud (2FA accounts)
+- **Limitations**:
+  - Syncs last 500 emails only (older emails not automatically synced)
+  - One-by-one fetching may be slow for accounts with many emails
+  - Exchange/Office365 may work but EWS or Microsoft Graph API preferred
+
 ## Architecture
 
 UniHub runs as **two containers**:
@@ -126,19 +151,18 @@ Open `http://<your-host>:3000` and sign in with the default admin credentials. *
 
 - **Contacts** — create, edit, search, and favorite contacts
 - **Calendar** — schedule events with color coding and location support
-- **Mail** — email account management (IMAP/SMTP sync is not yet implemented)
+- **Mail** — full email account management with IMAP/SMTP sync, email reading, reply/forward functionality
 - **Admin Panel** — user management for administrators
 - **PWA Support** — installable as a native-like app on mobile and desktop
-- **Authentication** — JWT-based auth with session management and rate limiting
+- **Authentication** — JWT-based auth with session management, CSRF protection, and rate limiting
 
 ## Known Limitations & Security Warnings
 
 > **This is an AI-generated project. Read the following carefully before deploying.**
 
 - **No HTTPS by default** — Nginx serves over plain HTTP; place a TLS-terminating reverse proxy (Caddy, Traefik, etc.) in front for production use
-- **Mail sync is not functional** — email accounts can be added but IMAP/SMTP sync is not implemented yet
+- **Mail sync limitations** — syncs last 500 emails per account; one-by-one fetching may be slow for large mailboxes; automatic sync runs every 10 minutes
 - **Basic input validation** — common cases are handled but edge cases may slip through
-- **No CSRF protection** — the API relies solely on JWT Bearer tokens
 - **No email verification** — user email addresses are not verified on signup
 - **In-memory rate limiting** — rate-limit state is lost when the container restarts
 - **Single-server only** — no clustering or horizontal scaling support

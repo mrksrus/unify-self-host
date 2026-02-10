@@ -1142,7 +1142,7 @@ const routes = {
     }
   },
   
-  'GET /api/auth/me': async (req, userId) => {
+  'GET /api/auth/me': async (req, userId, body, res) => {
     if (!userId) return { error: 'Unauthorized', status: 401 };
     
     try {
@@ -1155,7 +1155,11 @@ const routes = {
         return { error: 'User not found', status: 404 };
       }
       
-      return { user: users[0] };
+      // Refresh CSRF token on every /auth/me call to prevent stale tokens
+      const csrfToken = generateCsrfToken();
+      setCsrfCookie(res, csrfToken);
+      
+      return { user: users[0], csrfToken };
     } catch (error) {
       return { error: 'Failed to get user', status: 500 };
     }

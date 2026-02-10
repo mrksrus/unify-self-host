@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useToast } from '@/hooks/use-toast';
-import { Loader2, Users, Calendar, Mail, Shield } from 'lucide-react';
+import { Loader2, Users, Calendar, Mail } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { z } from 'zod';
 
@@ -115,7 +115,6 @@ const Auth = () => {
     { icon: Users, label: 'Contacts', description: 'Manage all your contacts' },
     { icon: Calendar, label: 'Calendar', description: 'Schedule and organize' },
     { icon: Mail, label: 'Mail', description: 'Multiple email accounts' },
-    { icon: Shield, label: 'Secure', description: 'Your data, protected' },
   ];
 
   return (
@@ -137,7 +136,7 @@ const Auth = () => {
             </p>
           </motion.div>
           
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-4">
             {features.map((feature, index) => (
               <motion.div
                 key={feature.label}

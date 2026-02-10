@@ -30,11 +30,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const token = localStorage.getItem('auth_token');
     if (token) {
       api.setToken(token);
-      // Verify token and get user info
-      api.get<{ user: User }>('/auth/me').then((response) => {
+      // Verify token and get user info (also refreshes CSRF token)
+      api.get<{ user: User; csrfToken?: string }>('/auth/me').then((response) => {
         if (response.data?.user) {
           setUser(response.data.user);
           setSession({ token });
+          // Refresh CSRF token if provided
+          if (response.data.csrfToken) {
+            api.setCsrfToken(response.data.csrfToken);
+          }
         } else {
           // Invalid token, clear it
           api.setToken(null);

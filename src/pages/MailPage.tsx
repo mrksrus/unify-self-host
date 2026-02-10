@@ -42,7 +42,10 @@ import {
   Edit,
   Reply,
   Forward,
-  ArrowLeft
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Menu
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format } from 'date-fns';
@@ -102,6 +105,7 @@ const MailPage = () => {
   const [isReplying, setIsReplying] = useState(false);
   const [accountToDelete, setAccountToDelete] = useState<string | null>(null);
   const [editingAccount, setEditingAccount] = useState<MailAccount | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [composeForm, setComposeForm] = useState({
     to: '',
     subject: '',
@@ -176,10 +180,15 @@ const MailPage = () => {
       queryClient.invalidateQueries({ queryKey: ['mail-accounts-count'] });
       queryClient.invalidateQueries({ queryKey: ['stats'] });
       
-      const syncMsg = data.syncResult?.message || 'Account added';
+      // Handle timeout case (sync in progress)
+      const syncMsg = data?.syncInProgress 
+        ? data.message || 'Account added. Email sync is running in the background — this may take several minutes for large mailboxes.'
+        : data?.syncResult?.message || 'Account added';
+      
       toast({ 
         title: '✓ Account connected successfully', 
-        description: syncMsg 
+        description: syncMsg,
+        duration: 10000,
       });
       
       setIsAddAccountOpen(false);
@@ -435,12 +444,27 @@ const MailPage = () => {
   return (
     <div className="flex h-[calc(100vh-0px)] overflow-hidden">
       {/* Sidebar */}
-      <div className="w-64 border-r border-border bg-card flex flex-col">
+      <div className={`${isMobile ? 'w-64' : (sidebarCollapsed ? 'w-16' : 'w-64')} border-r border-border bg-card flex flex-col transition-all duration-200`}>
         {/* Compose Button */}
-        <div className="p-4">
-          <Button className="w-full" onClick={() => setIsComposeOpen(true)}>
-            <PenSquare className="h-4 w-4 mr-2" />
-            Compose
+        <div className="p-4 flex items-center gap-2">
+          {!isMobile && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="shrink-0"
+              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            >
+              {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            </Button>
+          )}
+          <Button 
+            className={`${isMobile ? 'w-full' : (sidebarCollapsed ? 'w-full px-2' : 'w-full')}`} 
+            onClick={() => setIsComposeOpen(true)}
+            title={sidebarCollapsed && !isMobile ? 'Compose' : undefined}
+          >
+            <PenSquare className={`h-4 w-4 ${(sidebarCollapsed && !isMobile) ? '' : 'mr-2'}`} />
+            {(!sidebarCollapsed || isMobile) && 'Compose'}
           </Button>
         </div>
 
@@ -450,24 +474,27 @@ const MailPage = () => {
             <button
               key={folder.id}
               onClick={() => setSelectedFolder(folder.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+              className={`w-full flex items-center ${(sidebarCollapsed && !isMobile) ? 'justify-center' : 'gap-3'} px-3 py-2 rounded-lg text-sm transition-colors ${
                 selectedFolder === folder.id
                   ? 'bg-accent/10 text-accent font-medium'
                   : 'text-muted-foreground hover:bg-muted'
               }`}
+              title={(sidebarCollapsed && !isMobile) ? folder.label : undefined}
             >
-              <folder.icon className="h-4 w-4" />
-              {folder.label}
+              <folder.icon className="h-4 w-4 shrink-0" />
+              {(!sidebarCollapsed || isMobile) && <span>{folder.label}</span>}
             </button>
           ))}
         </nav>
 
         {/* Accounts */}
         <div className="flex-1 overflow-auto mt-6">
-          <div className="px-4 pb-2 flex items-center justify-between">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Accounts
-            </span>
+          <div className={`px-4 pb-2 flex items-center ${(sidebarCollapsed && !isMobile) ? 'justify-center' : 'justify-between'}`}>
+            {(!sidebarCollapsed || isMobile) && (
+              <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                Accounts
+              </span>
+            )}
             <Dialog open={isAddAccountOpen} onOpenChange={(open) => {
               setIsAddAccountOpen(open);
               if (!open) {
@@ -486,7 +513,7 @@ const MailPage = () => {
               }
             }}>
               <DialogTrigger asChild>
-                <Button variant="ghost" size="icon" className="h-6 w-6">
+                <Button variant="ghost" size="icon" className={`h-6 w-6 ${(sidebarCollapsed && !isMobile) ? 'mx-auto' : ''}`} title={(sidebarCollapsed && !isMobile) ? 'Add Account' : undefined}>
                   <Plus className="h-4 w-4" />
                 </Button>
               </DialogTrigger>
@@ -631,47 +658,52 @@ const MailPage = () => {
               </div>
             ) : (
               accounts.map((account) => (
-                <div key={account.id} className="relative group">
+                <div key={account.id} className={`relative group ${(sidebarCollapsed && !isMobile) ? 'flex justify-center' : ''}`}>
                   <button
                     onClick={() => setSelectedAccount(account.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    className={`w-full flex items-center ${(sidebarCollapsed && !isMobile) ? 'justify-center' : 'gap-3'} px-3 py-2 rounded-lg text-sm transition-colors ${
                       selectedAccount === account.id
                         ? 'bg-mail/10 text-mail font-medium'
                         : 'text-muted-foreground hover:bg-muted'
                     }`}
+                    title={(sidebarCollapsed && !isMobile) ? (account.display_name || account.email_address) : undefined}
                   >
-                    <div className="w-8 h-8 rounded-full bg-mail/10 flex items-center justify-center text-mail text-xs font-medium">
+                    <div className="w-8 h-8 rounded-full bg-mail/10 flex items-center justify-center text-mail text-xs font-medium shrink-0">
                       {account.email_address[0].toUpperCase()}
                     </div>
-                  <div className="flex-1 min-w-0 text-left">
-                    <p className="truncate">{account.display_name || account.email_address}</p>
-                    <p className="text-xs text-muted-foreground truncate">{account.email_address}</p>
-                  </div>
+                    {(!sidebarCollapsed || isMobile) && (
+                      <div className="flex-1 min-w-0 text-left">
+                        <p className="truncate">{account.display_name || account.email_address}</p>
+                        <p className="text-xs text-muted-foreground truncate">{account.email_address}</p>
+                      </div>
+                    )}
                   </button>
-                  <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleEditAccount(account);
-                      }}
-                    >
-                      <Edit className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-destructive hover:text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setAccountToDelete(account.id);
-                      }}
-                    >
-                      <X className="h-4 w-4" />
-                    </Button>
-                  </div>
+                  {(!sidebarCollapsed || isMobile) && (
+                    <div className="absolute right-1 top-1/2 -translate-y-1/2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleEditAccount(account);
+                        }}
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-destructive hover:text-destructive"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAccountToDelete(account.id);
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -749,11 +781,20 @@ const MailPage = () => {
                       // Fetch full email and open reader
                       try {
                         const response = await api.get<{ email: Email }>(`/mail/emails/${email.id}`);
+                        if (response.error) {
+                          toast({ title: 'Failed to load email', description: response.error, variant: 'destructive' });
+                          return;
+                        }
                         if (response.data?.email) {
                           setSelectedEmail(response.data.email);
+                        } else {
+                          // Fallback: use the email from list if full fetch fails
+                          setSelectedEmail(email);
                         }
                       } catch (error) {
-                        toast({ title: 'Failed to load email', variant: 'destructive' });
+                        console.error('Error loading email:', error);
+                        // Fallback: use the email from list
+                        setSelectedEmail(email);
                       }
                     }}
                   >
