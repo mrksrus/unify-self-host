@@ -203,11 +203,27 @@ The Vite dev server proxies API requests to `localhost:4000`.
 │   ├── nginx/             # Nginx configuration
 │   ├── mysql/             # Reference SQL schema (not required at runtime)
 │   └── start.sh           # Container startup script
+├── docs/                   # Technical documentation
+│   ├── MAIL_SYNC.md       # Email sync implementation details
+│   ├── ATTACHMENTS.md     # Attachment handling documentation
+│   ├── CONTACTS.md        # Contacts and vCard import/export
+│   └── CALENDAR.md        # Calendar events and date handling
 ├── docker-compose.yml     # Docker Compose YAML (paste-and-deploy ready)
 ├── Dockerfile             # Combined image (Nginx + Node.js API)
 └── package.json           # Frontend dependencies
 ```
-cally
+
+## Technical Documentation
+
+For detailed explanations of how different features work, see the documentation in the `docs/` folder:
+
+- **[Mail Sync](docs/MAIL_SYNC.md)** - How email synchronization works, IMAP protocol usage, one-by-one fetching strategy, and sync process details
+- **[Attachments](docs/ATTACHMENTS.md)** - Email attachment handling, inline images, storage architecture, and download endpoints
+- **[Contacts](docs/CONTACTS.md)** - Contact management, vCard import/export, parsing logic, and compatibility notes
+- **[Calendar](docs/CALENDAR.md)** - Calendar events, date/time handling, UTC storage, and event management
+
+These documents are learning resources explaining the implementation details, design decisions, and how the system works internally.
+
 ## License
 
 This project is provided as-is with no warranty. Use at your own risk.
