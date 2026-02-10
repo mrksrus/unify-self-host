@@ -156,10 +156,13 @@ async function syncMailAccount(accountId) {
     // Fetch recent emails - first get UIDs only (fast), then fetch only last 500 with bodies
     // This avoids downloading 2500+ full messages which causes timeouts
     console.log(`[SYNC] Getting message UIDs...`);
-    const uids = await connection.search(['ALL'], {});
+    // Search for all messages - returns array of message objects with attributes.uid
+    const searchResults = await connection.search(['ALL'], {});
+    // Extract UID numbers from the search results
+    const uids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
     console.log(`[SYNC] Found ${uids.length} messages in INBOX`);
     // #region agent log
-    debugLog('server.js:91', 'IMAP UID search completed', { uidCount: uids.length }, 'H1');
+    debugLog('server.js:91', 'IMAP UID search completed', { uidCount: uids.length, sampleUid: uids[0], sampleUidType: typeof uids[0] }, 'H1');
     // #endregion
 
     if (uids.length === 0) {
@@ -195,9 +198,16 @@ async function syncMailAccount(accountId) {
       const uid = uidsToProcess[i];
       processedCount++;
       
+      // Ensure uid is a number, not an object
+      if (typeof uid !== 'number') {
+        console.log(`[SYNC] [${processedCount}/${uidsToProcess.length}] Invalid UID type: ${typeof uid}, skipping`);
+        failedCount++;
+        continue;
+      }
+      
       try {
         // Fetch single email by UID
-        // Format: ['UID', uid] searches for specific UID
+        // Format: ['UID', uid] searches for specific UID (uid must be a number)
         const messageResults = await connection.search([['UID', uid]], fetchOptions);
         
         if (!messageResults || messageResults.length === 0) {
