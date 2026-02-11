@@ -9,7 +9,7 @@ services:
   #    Settings → Security → Change Password
   #
   unihub:
-    image: ghcr.io/mrksrus/unify-self-host:latest
+    image: ghcr.io/mrksrus/selfhost-unihub:latest
     pull_policy: always  # Always pull latest image on container start
     container_name: unihub
     restart: unless-stopped

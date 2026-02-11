@@ -7,7 +7,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mrksrus/unify-self-host
+  IMAGE_NAME: mrksrus/selfhost-unihub
 
 jobs:
   build-and-push:

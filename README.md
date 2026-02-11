@@ -43,7 +43,7 @@ UniHub runs as **two containers**:
 
 | Container | Image | Purpose |
 |-----------|-------|---------|
-| `unihub` | `ghcr.io/mrksrus/unify-self-host:latest` | Frontend (Nginx) + Backend API (Node.js) |
+| `unihub` | `ghcr.io/mrksrus/selfhost-unihub:latest` | Frontend (Nginx) + Backend API (Node.js) |
 | `unihub-mysql` | `mysql:8.0` | Database |
 
 The application container bundles the React frontend (served by Nginx) and the Node.js API into a single image. Nginx reverse-proxies `/api/*` requests to the API running inside the same container. The database schema and default admin user are created automatically on first startup — no init scripts or file mounts are needed.
@@ -63,7 +63,7 @@ networks:
 
 services:
   unihub:
-    image: ghcr.io/mrksrus/unify-self-host:latest
+    image: ghcr.io/mrksrus/selfhost-unihub:latest
     pull_policy: always  # Always pull latest image on container start (for auto-updates)
     container_name: unihub
     restart: unless-stopped
@@ -179,8 +179,8 @@ Open `http://<your-host>:3000` and sign in with the default admin credentials. *
 If you want to build the image yourself instead of pulling from GHCR:
 
 ```bash
-git clone https://github.com/mrksrus/unify-self-host.git
-cd unify-self-host
+git clone https://github.com/mrksrus/selfhost-unihub.git
+cd selfhost-unihub
 
 # Build and start (the docker-compose.yml includes a build: directive for this)
 docker compose up -d --build
