@@ -90,28 +90,23 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
       return { newEmails: 0, processed: 0, failed: 0, total: 0, error: openError.message };
     }
     
+    // First, get all UIDs (batch search for identification only)
     const searchResults = await connection.search(['ALL'], {});
-    const uids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
-    console.log(`[SYNC] Found ${uids.length} messages in ${folderName}`);
+    const allUids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
+    console.log(`[SYNC] Found ${allUids.length} messages in ${folderName}`);
     
-    if (uids.length === 0) {
+    if (allUids.length === 0) {
       return { newEmails: 0, processed: 0, failed: 0, total: 0 };
     }
     
-    const uidsToProcess = uids.slice(-500);
-    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName} (out of ${uids.length} total)...`);
+    // Get the actual last 500 UIDs (these are the real UIDs from the server)
+    const uidsToProcess = allUids.slice(-500);
+    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName} (out of ${allUids.length} total)...`);
+    console.log(`[SYNC] UID range: ${uidsToProcess[0]} to ${uidsToProcess[uidsToProcess.length - 1]}`);
     
     if (uidsToProcess.length === 0) {
-      return { newEmails: 0, processed: 0, failed: 0, total: uids.length };
+      return { newEmails: 0, processed: 0, failed: 0, total: allUids.length };
     }
-    
-    // Get the actual UID range (first and last UID)
-    const validUids = uidsToProcess.filter(uid => typeof uid === 'number');
-    if (validUids.length === 0) {
-      return { newEmails: 0, processed: 0, failed: 0, total: uids.length };
-    }
-    
-    console.log(`[SYNC] Identified ${validUids.length} UIDs to fetch (range: ${validUids[0]} to ${validUids[validUids.length - 1]})`);
     
     const fetchOptions = {
       bodies: ['HEADER', 'TEXT'],
@@ -124,19 +119,56 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
     let failedCount = 0;
     const uploadsDir = '/app/uploads/attachments';
     
-    // Sequentially download each email individually
-    for (let i = 0; i < validUids.length; i++) {
-      const uid = validUids[i];
+    // Sequentially download each email individually using the actual UIDs
+    for (let i = 0; i < uidsToProcess.length; i++) {
+      const uid = uidsToProcess[i];
       processedCount++;
       
-      console.log(`[SYNC] Downloading email ${processedCount}/${validUids.length} (UID: ${uid})...`);
+      console.log(`[SYNC] Downloading email ${processedCount}/${uidsToProcess.length} (UID: ${uid})...`);
       
       try {
-        // Fetch individual email by UID
+        // Fetch individual email by UID using the underlying node-imap connection
         let messageResults;
         try {
-          const uidRange = `${uid}:${uid}`;
-          messageResults = await connection.search([uidRange], fetchOptions);
+          // Access underlying node-imap connection
+          const imap = connection.imap || connection._imap;
+          if (!imap) {
+            throw new Error('Cannot access underlying IMAP connection');
+          }
+          
+          // Use node-imap's fetch method directly with UID (imap.fetch uses UIDs, not sequence numbers)
+          messageResults = await new Promise((resolve, reject) => {
+            const results = [];
+            // Pass UID as a string or number - node-imap accepts both
+            const fetch = imap.fetch(uid, {
+              bodies: ['HEADER', 'TEXT'],
+              struct: true
+            });
+            
+            fetch.on('message', (msg, seqno) => {
+              const parts = [];
+              msg.on('body', (stream, info) => {
+                const chunks = [];
+                stream.on('data', chunk => chunks.push(chunk));
+                stream.on('end', () => {
+                  const body = Buffer.concat(chunks).toString('utf8');
+                  parts.push({ which: info.which, body });
+                });
+              });
+              msg.once('attributes', (attrs) => {
+                // Store UID from attributes
+                if (attrs.uid) {
+                  msg._uid = attrs.uid;
+                }
+              });
+              msg.once('end', () => {
+                results.push({ attributes: { uid: msg._uid || uid }, parts });
+              });
+            });
+            
+            fetch.once('error', reject);
+            fetch.once('end', () => resolve(results));
+          });
         } catch (fetchError) {
           console.error(`[SYNC] ✗ Failed to download UID ${uid}:`, fetchError.message);
           failedCount++;
@@ -355,8 +387,8 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
       }
     }
     
-    console.log(`[SYNC] Completed ${folderName}: ${newEmailsCount} new emails, ${processedCount} processed, ${failedCount} failed out of ${uids.length} total`);
-    return { newEmails: newEmailsCount, processed: processedCount, failed: failedCount, total: uids.length };
+    console.log(`[SYNC] Completed ${folderName}: ${newEmailsCount} new emails, ${processedCount} processed, ${failedCount} failed out of ${allUids.length} total`);
+    return { newEmails: newEmailsCount, processed: processedCount, failed: failedCount, total: allUids.length };
   } catch (error) {
     console.error(`[SYNC] Error syncing ${folderName}:`, error.message);
     return { newEmails: 0, processed: 0, failed: 0, total: 0, error: error.message };
