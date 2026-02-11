@@ -92,7 +92,11 @@ const TodoPage = () => {
     queryFn: async () => {
       const response = await api.get<{ events: CalendarEvent[] }>('/calendar/events?include_todos=true');
       if (response.error) throw new Error(response.error);
-      return response.data?.events || [];
+      const fetchedEvents = response.data?.events || [];
+      // Debug: log todo_status values
+      console.log('[TodoPage] Fetched events:', fetchedEvents.length, 'events');
+      console.log('[TodoPage] Todo statuses:', fetchedEvents.map(e => ({ id: e.id, title: e.title, todo_status: e.todo_status, done_at: e.done_at })));
+      return fetchedEvents;
     },
   });
 
@@ -111,10 +115,13 @@ const TodoPage = () => {
     .filter((e) => e.todo_status === 'done')
     .sort((a, b) => {
       // Sort by done_at (newest first), fallback to updated_at if done_at is null
-      const aTime = a.done_at ? new Date(a.done_at).getTime() : new Date(a.updated_at).getTime();
-      const bTime = b.done_at ? new Date(b.done_at).getTime() : new Date(b.updated_at).getTime();
+      const aTime = a.done_at ? new Date(a.done_at).getTime() : (a.updated_at ? new Date(a.updated_at).getTime() : 0);
+      const bTime = b.done_at ? new Date(b.done_at).getTime() : (b.updated_at ? new Date(b.updated_at).getTime() : 0);
       return bTime - aTime;
     });
+  
+  // Debug: log done events
+  console.log('[TodoPage] Done events count:', doneEvents.length);
 
   // Update todo status mutation
   const updateTodoStatus = useMutation({
@@ -445,8 +452,8 @@ const TodoPage = () => {
         </div>
       )}
 
-      {/* Done Tasks Section */}
-      {doneEvents.length > 0 && (
+      {/* Done Tasks Section - Always show if there are any done events */}
+      {doneEvents.length > 0 ? (
         <Collapsible open={showDoneTasks} onOpenChange={setShowDoneTasks} className="mt-6">
           <CollapsibleTrigger asChild>
             <Button
@@ -524,6 +531,13 @@ const TodoPage = () => {
             </div>
           </CollapsibleContent>
         </Collapsible>
+      ) : (
+        // Show placeholder if no done tasks yet (for debugging)
+        doneEvents.length === 0 && events.length > 0 && (
+          <div className="mt-6 text-sm text-muted-foreground text-center">
+            No completed tasks yet. Mark tasks as "Done" to see them here.
+          </div>
+        )
       )}
 
       {/* Changed Dialog */}

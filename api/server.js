@@ -96,8 +96,9 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
       // Use SINCE to only get emails since last sync (subtract 1 day for safety margin)
       const sinceDate = new Date(lastSyncedAt);
       sinceDate.setDate(sinceDate.getDate() - 1); // 1 day margin for timezone/server differences
-      const sinceDateStr = sinceDate.toISOString().split('T')[0].replace(/-/g, '-');
-      searchCriteria = ['SINCE', sinceDateStr];
+      // Format date as ISO string for IMAP SINCE search (nested array format required)
+      const sinceDateStr = sinceDate.toISOString();
+      searchCriteria = [['SINCE', sinceDateStr]];
       console.log(`[SYNC] Using optimized search: emails since ${sinceDateStr} (last sync: ${lastSyncedAt})`);
     } else {
       console.log(`[SYNC] First sync - fetching last 500 emails`);
@@ -1688,6 +1689,8 @@ const routes = {
         ...row,
         start_time: row.start_time instanceof Date ? row.start_time.toISOString() : row.start_time,
         end_time: row.end_time instanceof Date ? row.end_time.toISOString() : row.end_time,
+        done_at: row.done_at instanceof Date ? row.done_at.toISOString() : (row.done_at || null),
+        updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
         reminders: row.reminders ? (typeof row.reminders === 'string' ? JSON.parse(row.reminders) : row.reminders) : null,
       }));
       return { events };
@@ -1779,13 +1782,11 @@ const routes = {
       }
 
       // Set done_at timestamp when marking as done, clear it when unmarking
-      const doneAtValue = todo_status === 'done' ? 'NOW()' : null;
-      
       let updateQuery = 'UPDATE calendar_events SET todo_status = ?';
       const params = [todo_status || null];
       
       // Add done_at to update query
-      if (doneAtValue) {
+      if (todo_status === 'done') {
         updateQuery += ', done_at = NOW()';
       } else {
         updateQuery += ', done_at = NULL';
@@ -1818,9 +1819,20 @@ const routes = {
       params.push(id, userId);
       
       await db.execute(updateQuery, params);
+      
+      // Debug: log the update
+      console.log(`[API] Updated todo_status for event ${id}: ${todo_status}, done_at ${todo_status === 'done' ? 'set' : 'cleared'}`);
 
       const [events] = await db.execute('SELECT * FROM calendar_events WHERE id = ? AND user_id = ?', [id, userId]);
-      return { event: events[0] };
+      const updatedEvent = events[0];
+      // Serialize dates for response
+      if (updatedEvent) {
+        updatedEvent.start_time = updatedEvent.start_time instanceof Date ? updatedEvent.start_time.toISOString() : updatedEvent.start_time;
+        updatedEvent.end_time = updatedEvent.end_time instanceof Date ? updatedEvent.end_time.toISOString() : updatedEvent.end_time;
+        updatedEvent.done_at = updatedEvent.done_at instanceof Date ? updatedEvent.done_at.toISOString() : (updatedEvent.done_at || null);
+        updatedEvent.updated_at = updatedEvent.updated_at instanceof Date ? updatedEvent.updated_at.toISOString() : updatedEvent.updated_at;
+      }
+      return { event: updatedEvent };
     } catch (error) {
       console.error('Update todo status error:', error);
       return { error: error.message || 'Failed to update todo status', status: 500 };
