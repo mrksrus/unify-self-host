@@ -200,6 +200,11 @@ const MailPage = () => {
     setEmailPage(1);
   }, [selectedFolder, selectedAccount]);
 
+  // Reset to page 1 when search query changes
+  useEffect(() => {
+    setEmailPage(1);
+  }, [searchQuery]);
+
   // Fetch email count for smart refresh (only refetch emails when count changes)
   const emailsPerPage = 50;
   const previousEmailCount = React.useRef<number | null>(null);
@@ -238,21 +243,33 @@ const MailPage = () => {
   }, [selectedAccount, selectedFolder]);
 
   // Fetch emails for selected account with pagination
+  // When searching, fetch all emails (large limit) to search across all pages
   const { data: emailsData, isLoading: emailsLoading } = useQuery({
-    queryKey: ['emails', selectedAccount, selectedFolder, emailPage],
+    queryKey: ['emails', selectedAccount, selectedFolder, emailPage, searchQuery],
     queryFn: async () => {
       if (!selectedAccount) return { emails: [], pagination: null };
       
       const folder = selectedFolder === 'starred' ? 'inbox' : selectedFolder;
-      const offset = (emailPage - 1) * emailsPerPage;
+      const isSearching = !!searchQuery.trim();
+      
+      // When searching, fetch all emails (use large limit) to search across all pages
+      // When not searching, use normal pagination
+      const limit = isSearching ? 10000 : emailsPerPage;
+      const offset = isSearching ? 0 : (emailPage - 1) * emailsPerPage;
+      
       const response = await api.get<{ emails: Email[]; pagination?: { total: number; limit: number; offset: number; page: number; totalPages: number } }>(
-        `/mail/emails?account_id=${selectedAccount}&folder=${folder}&limit=${emailsPerPage}&offset=${offset}`
+        `/mail/emails?account_id=${selectedAccount}&folder=${folder}&limit=${limit}&offset=${offset}`
       );
       if (response.error) throw new Error(response.error);
       let emails = response.data?.emails || [];
       
       if (selectedFolder === 'starred') {
         emails = emails.filter(e => e.is_starred);
+      }
+      
+      // When searching, return all emails without pagination info (pagination will be hidden)
+      if (isSearching) {
+        return { emails, pagination: null };
       }
       
       return { emails, pagination: response.data?.pagination || null };
@@ -445,7 +462,7 @@ const MailPage = () => {
       queryClient.invalidateQueries({ queryKey: ['emails'] });
       queryClient.invalidateQueries({ queryKey: ['stats'] });
       setSelectedEmails(new Set());
-      toast({ title: `✓ Deleted ${count} email(s)` });
+      toast({ title: `✓ Moved ${count} email(s) to trash` });
     },
     onError: (error: Error) => {
       toast({ title: 'Failed to delete emails', description: error.message, variant: 'destructive' });
@@ -539,12 +556,10 @@ const MailPage = () => {
     e.stopPropagation();
     const newSelected = new Set(selectedEmails);
     if (newSelected.has(emailId)) {
+      // Already selected: deselect it
       newSelected.delete(emailId);
     } else {
-      if (e.ctrlKey || e.metaKey) {
-        // Ctrl+Click: toggle selection
-        newSelected.add(emailId);
-      } else if (e.shiftKey && selectedEmails.size > 0) {
+      if (e.shiftKey && selectedEmails.size > 0) {
         // Shift+Click: select range
         const emailIds = emails.map(e => e.id);
         const startIdx = emailIds.findIndex(id => selectedEmails.has(id));
@@ -559,8 +574,7 @@ const MailPage = () => {
           newSelected.add(emailId);
         }
       } else {
-        // Regular click: single select
-        newSelected.clear();
+        // Regular click or Ctrl+Click: toggle selection (add to existing selection)
         newSelected.add(emailId);
       }
     }
@@ -729,7 +743,7 @@ const MailPage = () => {
           : `${sidebarCollapsed ? 'w-16' : 'w-64'} border-r border-border bg-card flex flex-col transition-all duration-200`
       }>
         {/* Compose Button */}
-        <div className="p-4 flex items-center gap-2">
+        <div className={`p-4 flex items-center gap-2 ${(sidebarCollapsed && !isMobile) ? 'flex-col' : ''}`}>
           {isMobile ? (
             <Button
               variant="ghost"
@@ -752,7 +766,7 @@ const MailPage = () => {
             </Button>
           )}
           <Button 
-            className={`${isMobile ? 'w-full' : (sidebarCollapsed ? 'w-full px-2' : 'w-full')}`} 
+            className="w-full" 
             onClick={() => setIsComposeOpen(true)}
             title={sidebarCollapsed && !isMobile ? 'Compose' : undefined}
           >
@@ -1047,7 +1061,7 @@ const MailPage = () => {
                 ({selectedEmails.size} selected)
               </span>
             )}
-            {selectedAccount && (
+            {selectedAccount && !selectedEmails.size && (
               <div className="relative flex-1 max-w-md ml-4">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
@@ -1070,7 +1084,7 @@ const MailPage = () => {
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             {selectedEmails.size > 0 && (
               <>
                 <Button
@@ -1149,12 +1163,14 @@ const MailPage = () => {
             <div className="flex flex-col items-center justify-center h-full text-center p-8">
               <Inbox className="h-16 w-16 text-muted-foreground/30 mb-4" />
               <h3 className="text-lg font-medium text-foreground mb-2">
-                No emails in {selectedFolder}
+                {searchQuery.trim() ? 'No search results' : `No emails in ${selectedFolder}`}
               </h3>
               <p className="text-muted-foreground">
-                {selectedFolder === 'inbox' 
-                  ? 'Your inbox is empty. Sync your account to fetch emails.'
-                  : `No emails in your ${selectedFolder} folder.`
+                {searchQuery.trim()
+                  ? `No emails found matching "${searchQuery}"`
+                  : selectedFolder === 'inbox' 
+                    ? 'Your inbox is empty. Sync your account to fetch emails.'
+                    : `No emails in your ${selectedFolder} folder.`
                 }
               </p>
             </div>
@@ -1263,8 +1279,15 @@ const MailPage = () => {
             </div>
           )}
           
-          {/* Pagination */}
-          {pagination && pagination.totalPages > 1 && (
+          {/* Search results indicator */}
+          {searchQuery.trim() && emails.length > 0 && (
+            <div className="border-t border-border p-4 text-center text-sm text-muted-foreground">
+              Found {emails.length} result{emails.length !== 1 ? 's' : ''} for "{searchQuery}"
+            </div>
+          )}
+          
+          {/* Pagination - hide when searching */}
+          {pagination && pagination.totalPages > 1 && !searchQuery.trim() && (
             <div className="border-t border-border p-4">
               <Pagination>
                 <PaginationContent>

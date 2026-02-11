@@ -2046,14 +2046,14 @@ const routes = {
         return { error: 'Email IDs array required', status: 400 };
       }
       
-      // Delete emails (they belong to user)
+      // Move emails to trash folder instead of permanently deleting
       const placeholders = email_ids.map(() => '?').join(',');
       await db.execute(
-        `DELETE FROM emails WHERE id IN (${placeholders}) AND user_id = ?`,
+        `UPDATE emails SET folder = 'trash' WHERE id IN (${placeholders}) AND user_id = ?`,
         [...email_ids, userId]
       );
       
-      return { message: `Deleted ${email_ids.length} email(s)` };
+      return { message: `Moved ${email_ids.length} email(s) to trash` };
     } catch (error) {
       console.error('[BULK] Delete error:', error);
       return { error: 'Failed to delete emails', status: 500 };
