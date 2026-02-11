@@ -1841,13 +1841,14 @@ const routes = {
   'GET /api/mail/emails': async (req, userId) => {
     if (!userId) return { error: 'Unauthorized', status: 401 };
     
+    let query, params, folder, accountId;
     try {
       const url = new URL(req.url, `http://${req.headers.host}`);
-      const folder = url.searchParams.get('folder') || 'inbox';
-      const accountId = url.searchParams.get('account_id');
+      folder = url.searchParams.get('folder') || 'inbox';
+      accountId = url.searchParams.get('account_id');
       
-      let query = 'SELECT * FROM emails WHERE user_id = ?';
-      const params = [userId];
+      query = 'SELECT * FROM emails WHERE user_id = ?';
+      params = [userId];
       
       if (folder) {
         query += ' AND folder = ?';
@@ -1864,8 +1865,9 @@ const routes = {
       const offset = parseInt(url.searchParams.get('offset') || '0', 10);
       const page = Math.max(1, Math.floor(offset / limit) + 1);
       
-      query += ' ORDER BY received_at DESC LIMIT ? OFFSET ?';
-      params.push(limit, offset);
+      // Use template literals for LIMIT/OFFSET since they're already sanitized integers
+      // This avoids parameter binding issues with mysql2
+      query += ` ORDER BY received_at DESC LIMIT ${limit} OFFSET ${offset}`;
       
       // Get total count for pagination
       let countQuery = 'SELECT COUNT(*) as total FROM emails WHERE user_id = ?';
@@ -1903,6 +1905,10 @@ const routes = {
       };
     } catch (error) {
       console.error(`[API] GET /api/mail/emails ERROR:`, error.message);
+      console.error(`[API] Query:`, query || 'N/A');
+      console.error(`[API] Params:`, params || 'N/A');
+      console.error(`[API] Folder:`, folder || 'N/A', `AccountId:`, accountId || 'N/A');
+      console.error(`[API] Error stack:`, error.stack);
       return { error: 'Failed to get emails', status: 500 };
     }
   },
