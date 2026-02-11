@@ -79,7 +79,7 @@ function decrypt(encryptedText) {
 // ── Mail sync and send functions ──────────────────────────────────
 
 // Helper function to sync a specific folder
-async function syncMailFolder(connection, account, accountId, folderName, dbFolderName) {
+async function syncMailFolder(connection, account, accountId, folderName, dbFolderName, lastSyncedAt = null) {
   try {
     console.log(`[SYNC] Opening ${folderName}...`);
     try {
@@ -90,18 +90,31 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
       return { newEmails: 0, processed: 0, failed: 0, total: 0, error: openError.message };
     }
     
-    // First, get all UIDs (batch search for identification only)
-    const searchResults = await connection.search(['ALL'], {});
+    // Optimize: Only fetch emails since last sync if we have a last_synced_at timestamp
+    let searchCriteria = ['ALL'];
+    if (lastSyncedAt) {
+      // Use SINCE to only get emails since last sync (subtract 1 day for safety margin)
+      const sinceDate = new Date(lastSyncedAt);
+      sinceDate.setDate(sinceDate.getDate() - 1); // 1 day margin for timezone/server differences
+      const sinceDateStr = sinceDate.toISOString().split('T')[0].replace(/-/g, '-');
+      searchCriteria = ['SINCE', sinceDateStr];
+      console.log(`[SYNC] Using optimized search: emails since ${sinceDateStr} (last sync: ${lastSyncedAt})`);
+    } else {
+      console.log(`[SYNC] First sync - fetching last 500 emails`);
+    }
+    
+    // Search for emails (either all or since last sync)
+    const searchResults = await connection.search(searchCriteria, {});
     const allUids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
-    console.log(`[SYNC] Found ${allUids.length} messages in ${folderName}`);
+    console.log(`[SYNC] Found ${allUids.length} messages in ${folderName}${lastSyncedAt ? ' since last sync' : ''}`);
     
     if (allUids.length === 0) {
       return { newEmails: 0, processed: 0, failed: 0, total: 0 };
     }
     
-    // Get the actual last 500 UIDs (these are the real UIDs from the server)
-    const uidsToProcess = allUids.slice(-500);
-    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName} (out of ${allUids.length} total)...`);
+    // If no lastSyncedAt, limit to last 500 for first sync. Otherwise process all found UIDs (should be new ones)
+    const uidsToProcess = lastSyncedAt ? allUids : allUids.slice(-500);
+    console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName}${lastSyncedAt ? ' (new since last sync)' : ' (last 500 for initial sync)'}...`);
     
     if (uidsToProcess.length === 0) {
       return { newEmails: 0, processed: 0, failed: 0, total: allUids.length };
@@ -426,6 +439,7 @@ async function syncMailAccount(accountId) {
     }
     
     const account = accounts[0];
+    const lastSyncedAt = account.last_synced_at;
     const password = account.encrypted_password ? decrypt(account.encrypted_password) : null;
     if (!password) {
       return { success: false, error: 'No password configured for this account' };
@@ -455,8 +469,8 @@ async function syncMailAccount(accountId) {
       console.error('[SYNC] IMAP connection error (handled, sync may fail):', err.message);
     });
     
-    // Sync INBOX only
-    const inboxResult = await syncMailFolder(connection, account, accountId, 'INBOX', 'inbox');
+    // Sync INBOX only (pass lastSyncedAt to optimize sync)
+    const inboxResult = await syncMailFolder(connection, account, accountId, 'INBOX', 'inbox', lastSyncedAt);
     
     // Clean up connection
     if (connection) {
@@ -1713,7 +1727,7 @@ const routes = {
 
     try {
       const id = req.url.split('/').pop();
-      const { title, description, start_time, end_time, all_day, location, color, recurrence, reminder_minutes, todo_status } = body;
+      const { title, description, start_time, end_time, all_day, location, color, recurrence, reminder_minutes, reminders, todo_status, is_todo_only } = body;
       const toMysqlDatetime = (v) => {
         if (v == null || v === '') return null;
         const d = new Date(v);
@@ -1724,9 +1738,14 @@ const routes = {
       const end = toMysqlDatetime(end_time);
       if (!start || !end) return { error: 'Valid start and end time are required', status: 400 };
 
+      // Handle reminders - ensure it's properly formatted
+      const remindersValue = reminders !== undefined && reminders !== null 
+        ? (Array.isArray(reminders) ? JSON.stringify(reminders) : reminders)
+        : null;
+      
       await db.execute(
         'UPDATE calendar_events SET title = ?, description = ?, start_time = ?, end_time = ?, all_day = ?, location = ?, color = ?, recurrence = ?, reminder_minutes = ?, reminders = ?, todo_status = ?, is_todo_only = ? WHERE id = ? AND user_id = ?',
-        [title?.trim() ?? '', description || null, start, end, !!all_day, location?.trim() || null, color || '#22c55e', recurrence || null, reminder_minutes ?? null, reminders ? JSON.stringify(reminders) : null, todo_status || null, !!is_todo_only, id, userId]
+        [title?.trim() ?? '', description || null, start, end, !!all_day, location?.trim() || null, color || '#22c55e', recurrence || null, reminder_minutes ?? null, remindersValue, todo_status || null, !!is_todo_only, id, userId]
       );
 
       const [events] = await db.execute('SELECT * FROM calendar_events WHERE id = ? AND user_id = ?', [id, userId]);

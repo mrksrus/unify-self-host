@@ -17,6 +17,20 @@ export default defineConfig(() => ({
     VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["favicon.ico", "favicon.svg", "robots.txt"],
+      workbox: {
+        runtimeCaching: [
+          {
+            urlPattern: /^https:\/\/api\./,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'api-cache',
+              networkTimeoutSeconds: 5,
+            },
+          },
+        ],
+        // Inject custom service worker code
+        importScripts: ['/sw-custom.js'],
+      },
       manifest: {
         name: "UniHub",
         short_name: "UniHub",

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { useCalendarNotifications } from '@/hooks/use-calendar-notifications';
@@ -10,9 +10,18 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import { CheckCircle2, Clock, XCircle, Edit, Loader2, Plus } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle, Edit, Loader2, Plus, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { format, parseISO } from 'date-fns';
+
+const colorOptions = [
+  { value: '#22c55e', label: 'Green' },
+  { value: '#3b82f6', label: 'Blue' },
+  { value: '#8b5cf6', label: 'Purple' },
+  { value: '#f59e0b', label: 'Orange' },
+  { value: '#ef4444', label: 'Red' },
+  { value: '#06b6d4', label: 'Cyan' },
+];
 
 interface CalendarEvent {
   id: string;
@@ -34,6 +43,24 @@ const TodoPage = () => {
   
   // Enable calendar notifications (tied to ToDo list)
   useCalendarNotifications();
+
+  // Listen for service worker messages to trigger calendar checks
+  useEffect(() => {
+    const handleSWMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'CHECK_CALENDAR') {
+        console.log('[TodoPage] Service worker requested calendar check');
+        // Invalidate calendar events query to trigger refetch
+        queryClient.invalidateQueries({ queryKey: ['calendar-events'] });
+      }
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSWMessage);
+      return () => {
+        navigator.serviceWorker.removeEventListener('message', handleSWMessage);
+      };
+    }
+  }, [queryClient]);
   const [isChangeDialogOpen, setIsChangeDialogOpen] = useState(false);
   const [isTimeMoveDialogOpen, setIsTimeMoveDialogOpen] = useState(false);
   const [isNewTodoDialogOpen, setIsNewTodoDialogOpen] = useState(false);
@@ -43,9 +70,13 @@ const TodoPage = () => {
     description: '',
   });
   const [changeForm, setChangeForm] = useState({
+    title: '',
+    description: '',
     start_time: '',
     end_time: '',
     location: '',
+    color: '#22c55e',
+    reminders: [0] as number[],
   });
   const [timeMoveForm, setTimeMoveForm] = useState({
     start_time: '',
@@ -61,15 +92,16 @@ const TodoPage = () => {
     },
   });
 
-  // Filter events: show upcoming calendar events, todos with status, and standalone todos
+  // Filter events: show all events that are NOT done or cancelled
+  // For events with times: show all that aren't done/cancelled
+  // For standalone todos: always show
   const upcomingEvents = events.filter((e) => {
     if (e.is_todo_only) {
       // Always show standalone todos
       return true;
     }
-    // For calendar events: show if upcoming or has todo_status
-    const eventDate = new Date(e.start_time);
-    return eventDate >= new Date() || e.todo_status !== null;
+    // For calendar events: show all that are NOT done or cancelled (regardless of date)
+    return e.todo_status !== 'done' && e.todo_status !== 'cancelled';
   }).sort((a, b) => {
     // Sort standalone todos first (they have far-future dates), then by date
     if (a.is_todo_only && !b.is_todo_only) return -1;
@@ -141,7 +173,7 @@ const TodoPage = () => {
       toast({ title: 'Event updated' });
       setIsChangeDialogOpen(false);
       setEditingEvent(null);
-      setChangeForm({ start_time: '', end_time: '', location: '' });
+      setChangeForm({ title: '', description: '', start_time: '', end_time: '', location: '', color: '#22c55e', reminders: [0] });
     },
     onError: (error: Error) => {
       toast({ title: 'Failed to update event', description: error.message, variant: 'destructive' });
@@ -155,9 +187,13 @@ const TodoPage = () => {
   const handleChanged = (event: CalendarEvent) => {
     setEditingEvent(event);
     setChangeForm({
+      title: event.title,
+      description: event.description || '',
       start_time: event.start_time.slice(0, 16), // Format for datetime-local input
       end_time: event.end_time.slice(0, 16),
       location: event.location || '',
+      color: event.color,
+      reminders: event.reminders || [0],
     });
     setIsChangeDialogOpen(true);
   };
@@ -174,23 +210,27 @@ const TodoPage = () => {
     updateTodoStatus.mutate({ id: event.id, todo_status: 'cancelled' });
   };
 
-  const handleChangeSubmit = (e: React.FormEvent) => {
+  const handleChangeSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!editingEvent) return;
     
-    // First update the event fields
+    // Update all event fields
     updateEvent.mutate({
       id: editingEvent.id,
-      start_time: changeForm.start_time,
-      end_time: changeForm.end_time,
+      title: changeForm.title,
+      description: changeForm.description || null,
+      start_time: changeForm.start_time ? new Date(changeForm.start_time).toISOString() : editingEvent.start_time,
+      end_time: changeForm.end_time ? new Date(changeForm.end_time).toISOString() : editingEvent.end_time,
       location: changeForm.location || null,
+      color: changeForm.color,
+      reminders: changeForm.reminders,
     });
     
     // Then set todo_status to 'changed'
     updateTodoStatus.mutate({ id: editingEvent.id, todo_status: 'changed' });
   };
 
-  const handleTimeMoveSubmit = (e: React.FormEvent) => {
+  const handleTimeMoveSubmit = (e: FormEvent) => {
     e.preventDefault();
     if (!editingEvent) return;
     updateTodoStatus.mutate({ 
@@ -406,22 +446,42 @@ const TodoPage = () => {
           </DialogHeader>
           <form onSubmit={handleChangeSubmit} className="space-y-4 mt-4">
             <div className="space-y-2">
-              <Label htmlFor="change-start-time">Start Time (optional)</Label>
+              <Label htmlFor="change-title">Title *</Label>
               <Input
-                id="change-start-time"
-                type="datetime-local"
-                value={changeForm.start_time}
-                onChange={(e) => setChangeForm({ ...changeForm, start_time: e.target.value })}
+                id="change-title"
+                value={changeForm.title}
+                onChange={(e) => setChangeForm({ ...changeForm, title: e.target.value })}
+                required
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="change-end-time">End Time (optional)</Label>
-              <Input
-                id="change-end-time"
-                type="datetime-local"
-                value={changeForm.end_time}
-                onChange={(e) => setChangeForm({ ...changeForm, end_time: e.target.value })}
+              <Label htmlFor="change-description">Description</Label>
+              <Textarea
+                id="change-description"
+                value={changeForm.description}
+                onChange={(e) => setChangeForm({ ...changeForm, description: e.target.value })}
+                rows={3}
               />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="change-start-time">Start Time (optional)</Label>
+                <Input
+                  id="change-start-time"
+                  type="datetime-local"
+                  value={changeForm.start_time}
+                  onChange={(e) => setChangeForm({ ...changeForm, start_time: e.target.value })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="change-end-time">End Time (optional)</Label>
+                <Input
+                  id="change-end-time"
+                  type="datetime-local"
+                  value={changeForm.end_time}
+                  onChange={(e) => setChangeForm({ ...changeForm, end_time: e.target.value })}
+                />
+              </div>
             </div>
             <div className="space-y-2">
               <Label htmlFor="change-location">Location (optional)</Label>
@@ -431,6 +491,78 @@ const TodoPage = () => {
                 onChange={(e) => setChangeForm({ ...changeForm, location: e.target.value })}
                 placeholder="Event location"
               />
+            </div>
+            <div className="space-y-2">
+              <Label>Color</Label>
+              <div className="flex gap-2">
+                {colorOptions.map((color) => (
+                  <button
+                    key={color.value}
+                    type="button"
+                    onClick={() => setChangeForm({ ...changeForm, color: color.value })}
+                    className={`w-8 h-8 rounded-full border-2 transition-all ${
+                      changeForm.color === color.value ? 'border-foreground scale-110' : 'border-transparent'
+                    }`}
+                    style={{ backgroundColor: color.value }}
+                  />
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Reminders (up to 3)</Label>
+              <div className="space-y-2">
+                {changeForm.reminders.map((reminder, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <Select
+                      value={reminder.toString()}
+                      onValueChange={(value) => {
+                        const newReminders = [...changeForm.reminders];
+                        newReminders[index] = parseInt(value);
+                        setChangeForm({ ...changeForm, reminders: newReminders });
+                      }}
+                    >
+                      <SelectTrigger className="flex-1">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">At event time</SelectItem>
+                        <SelectItem value="5">5 minutes before</SelectItem>
+                        <SelectItem value="15">15 minutes before</SelectItem>
+                        <SelectItem value="30">30 minutes before</SelectItem>
+                        <SelectItem value="60">1 hour before</SelectItem>
+                        <SelectItem value="120">2 hours before</SelectItem>
+                        <SelectItem value="1440">1 day before</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {changeForm.reminders.length > 1 && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => {
+                          const newReminders = changeForm.reminders.filter((_, i) => i !== index);
+                          setChangeForm({ ...changeForm, reminders: newReminders });
+                        }}
+                      >
+                        <X className="h-4 w-4" />
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                {changeForm.reminders.length < 3 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setChangeForm({ ...changeForm, reminders: [...changeForm.reminders, 15] });
+                    }}
+                  >
+                    <Plus className="h-4 w-4 mr-2" />
+                    Add Reminder
+                  </Button>
+                )}
+              </div>
             </div>
             <div className="flex justify-end gap-2">
               <Button type="button" variant="outline" onClick={() => setIsChangeDialogOpen(false)}>

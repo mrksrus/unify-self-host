@@ -226,12 +226,28 @@ const MailPage = () => {
     staleTime: 0,
   });
 
-  // Request notification permission on mount
+  // Request notification permission on mount and set up service worker listeners
   React.useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().catch(console.error);
     }
-  }, []);
+
+    // Listen for service worker messages to trigger email checks
+    const handleSWMessage = (event: MessageEvent) => {
+      if (event.data?.type === 'CHECK_EMAILS') {
+        console.log('[MailPage] Service worker requested email check');
+        // Invalidate email count query to trigger refetch
+        queryClient.invalidateQueries({ queryKey: ['email-count', selectedAccount] });
+      }
+    };
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', handleSWMessage);
+      return () => {
+        navigator.serviceWorker.removeEventListener('message', handleSWMessage);
+      };
+    }
+  }, [selectedAccount, queryClient]);
 
   // Track when count changes and invalidate emails query + show notification
   React.useEffect(() => {
@@ -246,11 +262,24 @@ const MailPage = () => {
       if ('Notification' in window && Notification.permission === 'granted') {
         // Only notify if we're not currently viewing inbox or if we're on a different folder
         if (selectedFolder !== 'inbox' || document.hidden) {
-          new Notification(`New Email${newEmailCount > 1 ? 's' : ''}`, {
-            body: `${newEmailCount} new email${newEmailCount > 1 ? 's' : ''} in your inbox`,
-            icon: '/favicon.ico',
-            tag: 'new-email',
-            requireInteraction: false,
+          // Use dynamic import to avoid circular dependencies
+          import('@/utils/service-worker').then(({ showNotification }) => {
+            showNotification(`New Email${newEmailCount > 1 ? 's' : ''}`, {
+              body: `${newEmailCount} new email${newEmailCount > 1 ? 's' : ''} in your inbox`,
+              icon: '/favicon.ico',
+              tag: 'new-email',
+              requireInteraction: false,
+            });
+          }).catch(() => {
+            // Fallback to regular Notification if service worker not available
+            if (document.visibilityState === 'visible') {
+              new Notification(`New Email${newEmailCount > 1 ? 's' : ''}`, {
+                body: `${newEmailCount} new email${newEmailCount > 1 ? 's' : ''} in your inbox`,
+                icon: '/favicon.ico',
+                tag: 'new-email',
+                requireInteraction: false,
+              });
+            }
           });
         }
       }

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/lib/api';
+import { showNotification, registerPeriodicSync, initServiceWorker } from '@/utils/service-worker';
 
 interface CalendarEvent {
   id: string;
@@ -12,11 +13,19 @@ interface CalendarEvent {
 export const useCalendarNotifications = () => {
   const notificationTimeoutsRef = useRef<Map<string, NodeJS.Timeout[]>>(new Map());
 
-  // Request notification permission
+  // Initialize service worker and request notification permission
   useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(console.error);
-    }
+    const setupNotifications = async () => {
+      await initServiceWorker();
+      if ('Notification' in window && Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+      
+      // Register periodic background sync for calendar checks (if supported)
+      await registerPeriodicSync('check-calendar-periodic', 15);
+    };
+    
+    setupNotifications();
   }, []);
 
   // Fetch calendar events
@@ -62,7 +71,7 @@ export const useCalendarNotifications = () => {
           if (!scheduledNotifications.has(notificationId)) {
             scheduledNotifications.add(notificationId);
             const timeout = setTimeout(() => {
-              new Notification(event.title, {
+              showNotification(event.title, {
                 body: reminderMinutes === 0 
                   ? 'Event is starting now'
                   : `Event starts in ${reminderMinutes} minute${reminderMinutes !== 1 ? 's' : ''}`,
