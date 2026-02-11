@@ -33,7 +33,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 210s   # Must exceed 120s MySQL wait in start.sh
+      start_period: 90s   # Reduced since MySQL startup is optimized
     networks:
       - unihub-network
     volumes:
@@ -55,15 +55,20 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --max-connections=100
+      - --innodb-buffer-pool-size=192M
+      - --innodb-log-file-size=48M
+      - --skip-name-resolve
+      - --skip-host-cache
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./docker/mysql/conf/custom.cnf:/etc/mysql/conf.d/custom.cnf:ro
     # Health check uses MYSQL_PWD to avoid YAML escaping issues
     healthcheck:
       test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping -h localhost -u root"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 120s
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
     networks:
       - unihub-network
 

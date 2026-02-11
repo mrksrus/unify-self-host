@@ -624,26 +624,25 @@ async function initDatabase() {
 
   const dbUrl = new URL(databaseUrl);
   const poolConfig = {
+    // Connection options (inherited by pool)
     host: dbUrl.hostname,
     port: parseInt(dbUrl.port, 10) || 3306,
     user: decodeURIComponent(dbUrl.username),
     password: decodeURIComponent(dbUrl.password),
     database: dbUrl.pathname.slice(1),
-    waitForConnections: true,
-    connectionLimit: 50, // Safe limit - each request uses 1 connection temporarily, mail syncs can hold connections longer
-    queueLimit: 0,
     timezone: '+00:00', // interpret DATETIME as UTC (we store UTC)
-    acquireTimeout: 60000, // 60 seconds timeout for acquiring connection from pool
-    reconnect: true, // Auto-reconnect on connection loss
-    enableKeepAlive: true, // Keep connections alive
-    keepAliveInitialDelay: 0,
-    // Connection lifecycle management
+    
+    // Pool-specific options only
+    waitForConnections: true,
+    connectionLimit: 50, // Maximum number of connections in the pool
+    queueLimit: 0, // Unlimited queue (0 = no limit)
     idleTimeout: 300000, // 5 minutes - close idle connections
     maxIdle: 5, // Keep max 5 idle connections
   };
 
   // Retry connection — MySQL may still be starting
-  for (let attempt = 1; attempt <= 15; attempt++) {
+  // Reduced retry time since MySQL startup is optimized
+  for (let attempt = 1; attempt <= 20; attempt++) {
     try {
       db = mysql.createPool(poolConfig);
       await db.execute('SELECT 1');
@@ -652,12 +651,14 @@ async function initDatabase() {
     } catch (error) {
       // Clean up the failed pool before retrying
       if (db) { await db.end().catch(() => {}); db = null; }
-      if (attempt === 15) {
-        console.error('✗ Database connection failed after 15 attempts:', error.message);
+      if (attempt === 20) {
+        console.error('✗ Database connection failed after 20 attempts:', error.message);
         process.exit(1);
       }
-      console.log(`⏳ Waiting for database (attempt ${attempt}/15)…`);
-      await new Promise(r => setTimeout(r, 3000));
+      // Faster retry intervals: 2s for first 5 attempts, then 3s
+      const waitTime = attempt <= 5 ? 2000 : 3000;
+      console.log(`⏳ Waiting for database (attempt ${attempt}/20)…`);
+      await new Promise(r => setTimeout(r, waitTime));
     }
   }
 
