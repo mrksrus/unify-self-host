@@ -102,7 +102,6 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
     // Get the actual last 500 UIDs (these are the real UIDs from the server)
     const uidsToProcess = allUids.slice(-500);
     console.log(`[SYNC] Will fetch ${uidsToProcess.length} emails from ${folderName} (out of ${allUids.length} total)...`);
-    console.log(`[SYNC] UID range: ${uidsToProcess[0]} to ${uidsToProcess[uidsToProcess.length - 1]}`);
     
     if (uidsToProcess.length === 0) {
       return { newEmails: 0, processed: 0, failed: 0, total: allUids.length };
@@ -375,11 +374,11 @@ async function syncMailFolder(connection, account, accountId, folderName, dbFold
         }
         
         newEmailsCount++;
-        console.log(`[SYNC] ✓ Successfully downloaded and saved email ${newEmailsCount}/${validUids.length} (UID: ${uid}) - Subject: ${parsed.subject || '(No subject)'}`);
+        console.log(`[SYNC] ✓ Successfully downloaded and saved email ${newEmailsCount}/${uidsToProcess.length} (UID: ${uid}) - Subject: ${parsed.subject || '(No subject)'}`);
       } catch (emailError) {
         failedCount++;
         // Log error for every email (since we're downloading individually)
-        console.error(`[SYNC] ✗ Failed to process email ${processedCount}/${validUids.length} (UID: ${uid}):`, emailError.message);
+        console.error(`[SYNC] ✗ Failed to process email ${processedCount}/${uidsToProcess.length} (UID: ${uid}):`, emailError.message);
         if (emailError.stack && failedCount <= 5) {
           console.error(`[SYNC] Stack trace:`, emailError.stack.substring(0, 300));
         }
@@ -493,37 +492,8 @@ async function syncMailAccount(accountId) {
       console.error('[SYNC] IMAP connection error (handled, sync may fail):', err.message);
     });
     
-    // Sync INBOX
+    // Sync INBOX only
     const inboxResult = await syncMailFolder(connection, account, accountId, 'INBOX', 'inbox');
-    
-    // Sync Sent folder (try common names)
-    let sentResult = { newEmails: 0, processed: 0, failed: 0, total: 0 };
-    try {
-      // Try common Sent folder names
-      const sentFolderNames = ['Sent', 'Sent Messages', '[Gmail]/Sent Mail'];
-      for (const folderName of sentFolderNames) {
-        try {
-          // Ensure connection is still valid before trying next folder
-          if (!connection || connection._socket?.destroyed) {
-            console.log(`[SYNC] Connection lost, cannot sync Sent folder`);
-            break;
-          }
-          sentResult = await syncMailFolder(connection, account, accountId, folderName, 'sent');
-          if (!sentResult.error) break; // Success, stop trying
-        } catch (e) {
-          // Connection might be in bad state - log and try next folder name
-          console.log(`[SYNC] Error syncing ${folderName}: ${e.message}`);
-          // If connection is broken, stop trying
-          if (e.message.includes('Connection') || e.message.includes('timeout') || e.message.includes('ECONN')) {
-            console.log(`[SYNC] Connection error detected, stopping Sent folder sync attempts`);
-            break;
-          }
-          continue;
-        }
-      }
-    } catch (sentError) {
-      console.log(`[SYNC] Could not sync Sent folder: ${sentError.message}`);
-    }
     
     // Clean up connection
     if (connection) {
@@ -540,21 +510,18 @@ async function syncMailAccount(accountId) {
       [accountId]
     );
     
-    const totalNew = inboxResult.newEmails + sentResult.newEmails;
-    const totalProcessed = inboxResult.processed + sentResult.processed;
-    const totalFailed = inboxResult.failed + sentResult.failed;
-    const resultMsg = `Synced ${account.email_address}: ${totalNew} new emails (${inboxResult.total} in INBOX, ${sentResult.total} in Sent, ${totalProcessed} processed, ${totalFailed} failed)`;
+    const resultMsg = `Synced ${account.email_address}: ${inboxResult.newEmails} new emails (${inboxResult.total} in INBOX, ${inboxResult.processed} processed, ${inboxResult.failed} failed)`;
     console.log(`[SYNC] ✓ ${resultMsg}`);
     
     // Log detailed summary for debugging
-    if (totalNew === 0 && totalProcessed > 0) {
-      console.warn(`[SYNC] ⚠ WARNING: Processed ${totalProcessed} emails but saved 0. This might indicate:`);
+    if (inboxResult.newEmails === 0 && inboxResult.processed > 0) {
+      console.warn(`[SYNC] ⚠ WARNING: Processed ${inboxResult.processed} emails but saved 0. This might indicate:`);
       console.warn(`[SYNC]   - All emails already exist in database (duplicate detection)`);
       console.warn(`[SYNC]   - Emails are empty or invalid`);
       console.warn(`[SYNC]   - Database insert errors (check logs above)`);
     }
     
-    return { success: true, newEmails: totalNew, totalFound: inboxResult.total + sentResult.total, message: resultMsg };
+    return { success: true, newEmails: inboxResult.newEmails, totalFound: inboxResult.total, message: resultMsg };
   } catch (error) {
     if (connection) {
       try { connection.end(); } catch (e) { /* ignore */ }
@@ -631,6 +598,41 @@ async function sendEmail(accountId, { to, subject, body, isHtml = false }) {
     // #region agent log
     debugLog('server.js:199', 'SMTP sendMail success', { messageId: info.messageId }, 'H5');
     // #endregion
+
+    // Save sent email to database
+    try {
+      const emailId = crypto.randomUUID();
+      const messageId = info.messageId || `<${Date.now()}-${emailId}@unihub.local>`;
+      
+      // Parse "to" addresses (can be comma-separated)
+      const toAddresses = to.split(',').map(addr => {
+        const match = addr.trim().match(/^(.+?)\s*<(.+?)>$/);
+        return match ? match[2].trim() : addr.trim();
+      });
+      
+      await db.execute(
+        'INSERT INTO emails (id, user_id, mail_account_id, message_id, subject, from_address, from_name, to_addresses, body_text, body_html, has_attachments, received_at, folder) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [
+          emailId,
+          account.user_id,
+          accountId,
+          messageId,
+          subject || '(No subject)',
+          account.email_address,
+          account.display_name || null,
+          JSON.stringify(toAddresses),
+          isHtml ? null : body,
+          isHtml ? body : null,
+          0, // has_attachments
+          new Date(),
+          'sent',
+        ]
+      );
+      console.log(`✓ Saved sent email to database: ${emailId}`);
+    } catch (saveError) {
+      // Log error but don't fail the send operation
+      console.error(`⚠ Failed to save sent email to database:`, saveError.message);
+    }
 
     console.log(`✓ Sent email from ${account.email_address}: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
