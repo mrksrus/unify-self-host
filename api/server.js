@@ -82,7 +82,13 @@ function decrypt(encryptedText) {
 async function syncMailFolder(connection, account, accountId, folderName, dbFolderName) {
   try {
     console.log(`[SYNC] Opening ${folderName}...`);
-    await connection.openBox(folderName);
+    try {
+      await connection.openBox(folderName);
+    } catch (openError) {
+      // Folder doesn't exist or can't be opened - return early without affecting connection state
+      console.log(`[SYNC] Could not open folder ${folderName}: ${openError.message}`);
+      return { newEmails: 0, processed: 0, failed: 0, total: 0, error: openError.message };
+    }
     
     const searchResults = await connection.search(['ALL'], {});
     const uids = searchResults.map(msg => msg.attributes?.uid).filter(uid => typeof uid === 'number');
@@ -418,10 +424,21 @@ async function syncMailAccount(accountId) {
       const sentFolderNames = ['Sent', 'Sent Messages', '[Gmail]/Sent Mail'];
       for (const folderName of sentFolderNames) {
         try {
+          // Ensure connection is still valid before trying next folder
+          if (!connection || connection._socket?.destroyed) {
+            console.log(`[SYNC] Connection lost, cannot sync Sent folder`);
+            break;
+          }
           sentResult = await syncMailFolder(connection, account, accountId, folderName, 'sent');
           if (!sentResult.error) break; // Success, stop trying
         } catch (e) {
-          // Try next folder name
+          // Connection might be in bad state - log and try next folder name
+          console.log(`[SYNC] Error syncing ${folderName}: ${e.message}`);
+          // If connection is broken, stop trying
+          if (e.message.includes('Connection') || e.message.includes('timeout') || e.message.includes('ECONN')) {
+            console.log(`[SYNC] Connection error detected, stopping Sent folder sync attempts`);
+            break;
+          }
           continue;
         }
       }
@@ -429,7 +446,14 @@ async function syncMailAccount(accountId) {
       console.log(`[SYNC] Could not sync Sent folder: ${sentError.message}`);
     }
     
-    if (connection) connection.end();
+    // Clean up connection
+    if (connection) {
+      try {
+        connection.end();
+      } catch (endError) {
+        console.log(`[SYNC] Error closing connection: ${endError.message}`);
+      }
+    }
     
     // Update last synced
     await db.execute(
@@ -571,9 +595,17 @@ async function initDatabase() {
     password: decodeURIComponent(dbUrl.password),
     database: dbUrl.pathname.slice(1),
     waitForConnections: true,
-    connectionLimit: 10,
+    connectionLimit: 50, // Safe limit - each request uses 1 connection temporarily, mail syncs can hold connections longer
     queueLimit: 0,
     timezone: '+00:00', // interpret DATETIME as UTC (we store UTC)
+    acquireTimeout: 60000, // 60 seconds timeout for acquiring connection
+    timeout: 60000, // 60 seconds query timeout
+    reconnect: true, // Auto-reconnect on connection loss
+    enableKeepAlive: true, // Keep connections alive
+    keepAliveInitialDelay: 0,
+    // Connection lifecycle management
+    idleTimeout: 300000, // 5 minutes - close idle connections
+    maxIdle: 5, // Keep max 5 idle connections
   };
 
   // Retry connection — MySQL may still be starting
@@ -906,17 +938,33 @@ async function verifyToken(authHeader) {
   }
 
   try {
-    const [sessions] = await db.execute(
-      'SELECT user_id, expires_at FROM sessions WHERE token = ? LIMIT 1',
-      [token]
-    );
+    // Add retry logic for database queries
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        const [sessions] = await db.execute(
+          'SELECT user_id, expires_at FROM sessions WHERE token = ? LIMIT 1',
+          [token]
+        );
 
-    if (sessions.length === 0) return null;
-    const session = sessions[0];
-    if (new Date(session.expires_at) < new Date()) return null;
+        if (sessions.length === 0) return null;
+        const session = sessions[0];
+        if (new Date(session.expires_at) < new Date()) return null;
 
-    return session.user_id || decoded.userId || decoded.sub;
-  } catch {
+        return session.user_id || decoded.userId || decoded.sub;
+      } catch (dbError) {
+        retries--;
+        if (retries === 0) {
+          console.error('[AUTH] Database error in verifyToken:', dbError.message);
+          return null;
+        }
+        // Wait a bit before retrying
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error('[AUTH] Error in verifyToken:', error.message);
     return null;
   }
 }
@@ -1154,10 +1202,27 @@ const routes = {
     }
     
     try {
-      const [users] = await db.execute(
-        'SELECT id, email, password_hash, full_name, role, is_active FROM users WHERE email = ?',
-        [email]
-      );
+      // Add retry logic for database queries
+      let users;
+      let retries = 3;
+      while (retries > 0) {
+        try {
+          const result = await db.execute(
+            'SELECT id, email, password_hash, full_name, role, is_active FROM users WHERE email = ?',
+            [email]
+          );
+          users = result[0];
+          break;
+        } catch (dbError) {
+          retries--;
+          if (retries === 0) {
+            console.error('[AUTH] Database error in signin:', dbError.message);
+            recordFailedAttempt(ip);
+            return { error: 'Database connection error. Please try again.', status: 503 };
+          }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
       
       if (users.length === 0) {
         recordFailedAttempt(ip);
@@ -1179,12 +1244,26 @@ const routes = {
       const token = generateToken(user.id);
       const csrfToken = generateCsrfToken();
       
-      // Create session
+      // Create session with retry logic
       const expiresAt = getSessionExpiry();
-      await db.execute(
-        'INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)',
-        [user.id, token, expiresAt]
-      );
+      retries = 3;
+      while (retries > 0) {
+        try {
+          await db.execute(
+            'INSERT INTO sessions (user_id, token, expires_at) VALUES (?, ?, ?)',
+            [user.id, token, expiresAt]
+          );
+          break;
+        } catch (dbError) {
+          retries--;
+          if (retries === 0) {
+            console.error('[AUTH] Database error creating session:', dbError.message);
+            recordFailedAttempt(ip);
+            return { error: 'Failed to create session. Please try again.', status: 503 };
+          }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
       
       resetRateLimit(ip);
       const result = { token, csrfToken, user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role } };
@@ -2292,7 +2371,61 @@ async function start() {
     }
   }, 10 * 60 * 1000); // 10 minutes
   
+  // Clean up expired sessions every hour to prevent table bloat
+  setInterval(async () => {
+    try {
+      const [result] = await db.execute(
+        'DELETE FROM sessions WHERE expires_at < UTC_TIMESTAMP()'
+      );
+      if (result.affectedRows > 0) {
+        console.log(`[CLEANUP] Deleted ${result.affectedRows} expired session(s)`);
+      }
+    } catch (error) {
+      console.error('[CLEANUP] Error cleaning expired sessions:', error.message);
+    }
+  }, 60 * 60 * 1000); // 1 hour
+  
+  // Database connection pool health check and cleanup every 15 minutes
+  setInterval(async () => {
+    try {
+      // Test connection pool health with a simple query
+      await db.execute('SELECT 1');
+      
+      // Get pool statistics (mysql2 pool internal structure)
+      const pool = db.pool;
+      if (pool && pool._allConnections) {
+        const totalConnections = pool._allConnections.length || 0;
+        const freeConnections = pool._freeConnections?.length || 0;
+        const activeConnections = totalConnections - freeConnections;
+        const queuedRequests = pool._connectionQueue?.length || 0;
+        
+        console.log(`[DB POOL] Total: ${totalConnections}, Active: ${activeConnections}, Free: ${freeConnections}, Queued: ${queuedRequests}`);
+        
+        // If we're using too many connections, log a warning (warn at 80% usage)
+        if (activeConnections > 40) {
+          console.warn(`[DB POOL] ⚠ High connection usage: ${activeConnections}/50 connections in use`);
+        }
+        
+        // If we have many idle connections, we can let them timeout naturally
+        if (freeConnections > 8) {
+          console.log(`[DB POOL] Many idle connections (${freeConnections}), will timeout naturally`);
+        }
+      }
+    } catch (error) {
+      console.error('[DB POOL] Health check error:', error.message);
+      // Try to reconnect if connection is lost
+      try {
+        await db.execute('SELECT 1');
+        console.log('[DB POOL] Reconnection successful');
+      } catch (reconnectError) {
+        console.error('[DB POOL] Reconnection failed:', reconnectError.message);
+      }
+    }
+  }, 15 * 60 * 1000); // 15 minutes
+  
   console.log('✓ Periodic mail sync enabled (every 10 minutes)');
+  console.log('✓ Expired session cleanup enabled (every hour)');
+  console.log('✓ Database connection pool health check enabled (every 15 minutes)');
 }
 
 start();
