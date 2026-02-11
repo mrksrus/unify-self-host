@@ -598,8 +598,7 @@ async function initDatabase() {
     connectionLimit: 50, // Safe limit - each request uses 1 connection temporarily, mail syncs can hold connections longer
     queueLimit: 0,
     timezone: '+00:00', // interpret DATETIME as UTC (we store UTC)
-    acquireTimeout: 60000, // 60 seconds timeout for acquiring connection
-    timeout: 60000, // 60 seconds query timeout
+    acquireTimeout: 60000, // 60 seconds timeout for acquiring connection from pool
     reconnect: true, // Auto-reconnect on connection loss
     enableKeepAlive: true, // Keep connections alive
     keepAliveInitialDelay: 0,
